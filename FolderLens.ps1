@@ -275,7 +275,11 @@ public static class FolderLensPathResolver
         if ($CommandArguments -match '(?i)(?:^|\s)--single-argument(?:\s|$)') {
             $fileArgument = ([Uri]$FilePath).AbsoluteUri
         }
-        $quotedFileArgument = '"' + $fileArgument + '"'
+        $quotedFileArgument = if ($fileArgument -eq $FilePath) {
+            '"' + $fileArgument + '"'
+        } else {
+            $fileArgument
+        }
 
         if ($CommandArguments -match '"%[1lL]"') {
             return [regex]::Replace(
