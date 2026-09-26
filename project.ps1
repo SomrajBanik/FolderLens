@@ -1,0 +1,1283 @@
+param(
+    [Parameter(Position=0)]
+    [string]$FolderPath
+)
+
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+
+    if ([string]::IsNullOrWhiteSpace($FolderPath)) {
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = "Choose a folder to browse"
+        $dialog.SelectedPath = $PSScriptRoot
+        $dialog.ShowNewFolderButton = $false
+        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+            return
+        }
+        $FolderPath = $dialog.SelectedPath
+    }
+
+    $root = [IO.Path]::GetFullPath($FolderPath)
+    $pathRoot = [IO.Path]::GetPathRoot($root)
+    if (-not $root.Equals($pathRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $root = $root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw "Folder not found: $root"
+    }
+
+    if (-not ('ExplorerNameComparer' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections;
+using System.IO;
+using System.Runtime.InteropServices;
+
+public sealed class ExplorerNameComparer : IComparer
+{
+    [DllImport("Shlwapi.dll", CharSet = CharSet.Unicode)]
+    private static extern int StrCmpLogicalW(string left, string right);
+
+    public int Compare(object x, object y)
+    {
+        var left = x as string;
+        var right = y as string;
+        return StrCmpLogicalW(left ?? String.Empty, right ?? String.Empty);
+    }
+}
+'@
+    }
+
+    $port = 8765
+    $url = "http://localhost:$port/"
+    $edgePath = @(
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+        "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if (-not $edgePath) {
+        $edgeAppPath = Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe" -ErrorAction SilentlyContinue
+        if ($edgeAppPath -and (Test-Path -LiteralPath $edgeAppPath.'(default)')) {
+            $edgePath = $edgeAppPath.'(default)'
+        }
+    }
+
+    function Test-PathWithinRoot {
+        param([Parameter(Mandatory=$true)][string]$Path)
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        if ($root.EndsWith([IO.Path]::DirectorySeparatorChar.ToString()) -or $root.EndsWith([IO.Path]::AltDirectorySeparatorChar.ToString())) {
+            return $fullPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+        }
+        return $fullPath.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $fullPath.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+            $fullPath.StartsWith($root + [IO.Path]::AltDirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Get-RelativeFolderName {
+        param([Parameter(Mandatory=$true)][string]$Path)
+        $directoryPath = if (Test-Path -LiteralPath $Path -PathType Container) { $Path } else { [IO.Path]::GetDirectoryName($Path) }
+        if ($directoryPath.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+            return "This folder"
+        }
+        return "Subfolder: " + $directoryPath.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace('\', ' / ')
+    }
+
+    function Get-LibraryCatalog {
+        $sections = [ordered]@{}
+        $targets = @{}
+        $sections["This folder"] = @()
+        $targets["This folder"] = $root
+        $directories = @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force -ErrorAction Stop |
+            Where-Object { Test-PathWithinRoot -Path $_.FullName })
+        foreach ($directory in $directories) {
+            $sectionName = Get-RelativeFolderName -Path $directory.FullName
+            if (-not $sections.Contains($sectionName)) {
+                $sections[$sectionName] = @()
+                $targets[$sectionName] = $directory.FullName
+            }
+        }
+        $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop |
+            Where-Object { Test-PathWithinRoot -Path $_.FullName })
+
+        foreach ($file in $files) {
+            $sectionName = Get-RelativeFolderName -Path $file.FullName
+            if (-not $sections.Contains($sectionName)) {
+                $sections[$sectionName] = @()
+                $targets[$sectionName] = $file.DirectoryName
+            }
+            $extension = $file.Extension.TrimStart('.').ToUpperInvariant()
+            if ([string]::IsNullOrWhiteSpace($extension)) { $extension = "FILE" }
+            $previewKind = switch -Regex ($file.Extension.ToLowerInvariant()) {
+                '^\.(png|jpe?g|gif|bmp|webp|avif|svg|ico)$' { 'image'; break }
+                '^\.(mp4|webm|ogv|mov|m4v)$' { 'video'; break }
+                '^\.(mp3|wav|ogg|m4a|flac|aac)$' { 'audio'; break }
+                '^\.(pdf)$' { 'pdf'; break }
+                '^\.(txt|md|csv|log|json|xml|html?|css|js|ps1|py|bat|cmd|ini|yml|yaml|toml|rtf)$' { 'text'; break }
+                default { 'unsupported' }
+            }
+            $sections[$sectionName] += [PSCustomObject]@{
+                name = $file.Name
+                path = $file.FullName
+                ext = $extension
+                size = [int64]$file.Length
+                added = $file.LastWriteTimeUtc.ToString('o')
+                image = $file.Extension -match '^\.(png|jpe?g|gif|bmp|webp|avif)$'
+                previewKind = $previewKind
+            }
+        }
+
+        $sortedSections = [ordered]@{}
+        $sectionNames = [string[]]@($sections.Keys)
+        [Array]::Sort($sectionNames, (New-Object ExplorerNameComparer))
+        foreach ($sectionName in $sectionNames) {
+            $sortedSections[$sectionName] = @($sections[$sectionName] | Sort-Object name)
+        }
+        return [PSCustomObject]@{ Sections = $sortedSections; Targets = $targets; Count = $files.Count }
+    }
+
+    function Get-QueryValue {
+        param(
+            [Parameter(Mandatory=$true)][string]$Query,
+            [Parameter(Mandatory=$true)][string]$Name
+        )
+        foreach ($part in $Query.TrimStart('?').Split('&')) {
+            $pair = [regex]::Split($part, '=', 2)
+            if ($pair.Count -eq 2 -and $pair[0] -eq $Name) {
+                return [Uri]::UnescapeDataString($pair[1].Replace('+', ' '))
+            }
+        }
+        return $null
+    }
+
+    function Get-RegisteredOpenCommand {
+        param([Parameter(Mandatory=$true)][string]$ProgId)
+        $keyPath = "Registry::HKEY_CLASSES_ROOT\$ProgId\shell\open\command"
+        $key = Get-Item -LiteralPath $keyPath -ErrorAction SilentlyContinue
+        if (-not $key) { return $null }
+        $command = [string]$key.GetValue('')
+        if ([string]::IsNullOrWhiteSpace($command)) { return $null }
+
+        $expanded = [Environment]::ExpandEnvironmentVariables($command)
+        $match = [regex]::Match($expanded, '^\s*"([^"]+)"|^\s*([^\s]+)')
+        if (-not $match.Success) { return $null }
+        $executable = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+            $commandInfo = Get-Command -Name $executable -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($commandInfo) { $executable = $commandInfo.Source } else { return $null }
+        }
+
+        [PSCustomObject]@{
+            Executable = $executable
+            Arguments = $expanded.Substring($match.Length).Trim()
+        }
+    }
+
+    $script:appCatalogById = @{}
+    function Get-InstalledAppsForExtension {
+        param([Parameter(Mandatory=$true)][string]$Extension)
+
+        $extension = $Extension.ToLowerInvariant()
+        $progidSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $exeNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $extensionKey = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\$extension" -ErrorAction SilentlyContinue
+        if ($extensionKey) {
+            $defaultProgId = [string]$extensionKey.GetValue('')
+            if ($defaultProgId) { [void]$progidSet.Add($defaultProgId) }
+            $openWithProgIds = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\$extension\OpenWithProgids" -ErrorAction SilentlyContinue
+            if ($openWithProgIds) {
+                foreach ($name in $openWithProgIds.GetValueNames()) {
+                    if ($name) { [void]$progidSet.Add($name) }
+                }
+            }
+            $openWithList = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\$extension\OpenWithList" -ErrorAction SilentlyContinue
+            if ($openWithList) {
+                foreach ($entry in $openWithList.GetSubKeyNames()) {
+                    if ($entry) { [void]$exeNames.Add($entry) }
+                }
+            }
+        }
+
+        $userOpenWith = Get-Item -LiteralPath "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$extension\OpenWithProgids" -ErrorAction SilentlyContinue
+        if ($userOpenWith) {
+            foreach ($name in $userOpenWith.GetValueNames()) {
+                if ($name) { [void]$progidSet.Add($name) }
+            }
+        }
+        $userList = Get-Item -LiteralPath "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$extension\OpenWithList" -ErrorAction SilentlyContinue
+        if ($userList) {
+            foreach ($name in $userList.GetValueNames()) {
+                $exeName = [string]$userList.GetValue($name)
+                if ($exeName) { [void]$exeNames.Add($exeName) }
+            }
+        }
+        $userChoice = Get-ItemProperty -LiteralPath "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$extension\UserChoice" -ErrorAction SilentlyContinue
+        if ($userChoice -and $userChoice.ProgId) {
+            [void]$progidSet.Add([string]$userChoice.ProgId)
+        }
+
+        $apps = @()
+        foreach ($progId in $progidSet) {
+            $command = Get-RegisteredOpenCommand -ProgId $progId
+            if (-not $command) { continue }
+            $appKey = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\$progId" -ErrorAction SilentlyContinue
+            $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($command.Executable)
+            $name = $versionInfo.ProductName
+            if (-not $name) { $name = $versionInfo.FileDescription }
+            $applicationKey = Get-Item -LiteralPath ("Registry::HKEY_CLASSES_ROOT\Applications\" + (Split-Path -Leaf $command.Executable)) -ErrorAction SilentlyContinue
+            if ((-not $name -or $name.StartsWith('@')) -and $applicationKey) { $name = [string]$applicationKey.GetValue('FriendlyAppName') }
+            if (-not $name -and $appKey) { $name = [string]$appKey.GetValue('FriendlyTypeName') }
+            if (-not $name -or $name.StartsWith('@')) {
+                $name = [IO.Path]::GetFileNameWithoutExtension($command.Executable)
+            }
+            $apps += [PSCustomObject]@{ Name = $name; ProgId = $progId; Executable = $command.Executable; Arguments = $command.Arguments }
+        }
+        foreach ($exeName in $exeNames) {
+            $appKey = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\Applications\$exeName" -ErrorAction SilentlyContinue
+            if (-not $appKey) { continue }
+            $command = Get-RegisteredOpenCommand -ProgId "Applications\$exeName"
+            if (-not $command) { continue }
+            $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($command.Executable)
+            $name = $versionInfo.ProductName
+            if (-not $name) { $name = $versionInfo.FileDescription }
+            if (-not $name) { $name = [string]$appKey.GetValue('FriendlyAppName') }
+            if (-not $name -or $name.StartsWith('@')) { $name = $exeName }
+            $apps += [PSCustomObject]@{ Name = $name; ProgId = "Applications\$exeName"; Executable = $command.Executable; Arguments = $command.Arguments }
+        }
+
+        $script:appCatalogById.Clear()
+        $result = @([PSCustomObject]@{ id = 'default'; name = 'Windows default app' })
+        $uniqueApps = @{}
+        foreach ($app in $apps) {
+            $key = $app.Executable.ToLowerInvariant()
+            if (-not $uniqueApps.ContainsKey($key) -or
+                ($uniqueApps[$key].Name -match '\.exe$' -and $app.Name -notmatch '\.exe$')) {
+                $uniqueApps[$key] = $app
+            }
+        }
+        foreach ($app in ($uniqueApps.Values | Sort-Object Name)) {
+            $id = [Guid]::NewGuid().ToString('N')
+            $script:appCatalogById[$id] = $app
+            $result += [PSCustomObject]@{ id = $id; name = $app.Name }
+        }
+        return $result
+    }
+
+    function Get-ContentType {
+        param([Parameter(Mandatory=$true)][string]$Extension)
+        switch ($Extension.ToLowerInvariant()) {
+            '.svg' { 'image/svg+xml'; break }
+            '.ico' { 'image/x-icon'; break }
+            '.jpg' { 'image/jpeg'; break }
+            '.jpeg' { 'image/jpeg'; break }
+            '.png' { 'image/png'; break }
+            '.gif' { 'image/gif'; break }
+            '.bmp' { 'image/bmp'; break }
+            '.webp' { 'image/webp'; break }
+            '.avif' { 'image/avif'; break }
+            '.pdf' { 'application/pdf'; break }
+            '.mp4' { 'video/mp4'; break }
+            '.webm' { 'video/webm'; break }
+            '.ogv' { 'video/ogg'; break }
+            '.mov' { 'video/quicktime'; break }
+            '.m4v' { 'video/mp4'; break }
+            '.mp3' { 'audio/mpeg'; break }
+            '.wav' { 'audio/wav'; break }
+            '.ogg' { 'audio/ogg'; break }
+            '.m4a' { 'audio/mp4'; break }
+            '.flac' { 'audio/flac'; break }
+            '.aac' { 'audio/aac'; break }
+            '.txt' { 'text/plain; charset=utf-8'; break }
+            '.md' { 'text/plain; charset=utf-8'; break }
+            '.csv' { 'text/plain; charset=utf-8'; break }
+            '.log' { 'text/plain; charset=utf-8'; break }
+            '.json' { 'text/plain; charset=utf-8'; break }
+            '.xml' { 'text/plain; charset=utf-8'; break }
+            '.html' { 'text/plain; charset=utf-8'; break }
+            '.htm' { 'text/plain; charset=utf-8'; break }
+            '.css' { 'text/plain; charset=utf-8'; break }
+            '.js' { 'text/plain; charset=utf-8'; break }
+            '.ps1' { 'text/plain; charset=utf-8'; break }
+            '.py' { 'text/plain; charset=utf-8'; break }
+            '.bat' { 'text/plain; charset=utf-8'; break }
+            '.cmd' { 'text/plain; charset=utf-8'; break }
+            '.ini' { 'text/plain; charset=utf-8'; break }
+            '.yml' { 'text/plain; charset=utf-8'; break }
+            '.yaml' { 'text/plain; charset=utf-8'; break }
+            '.toml' { 'text/plain; charset=utf-8'; break }
+            '.rtf' { 'text/plain; charset=utf-8'; break }
+            default { 'application/octet-stream' }
+        }
+    }
+
+    function Write-JsonResponse {
+        param(
+            [Parameter(Mandatory=$true)]$Response,
+            [Parameter(Mandatory=$true)]$Value,
+            [int]$StatusCode = 200
+        )
+        $json = ConvertTo-Json -InputObject $Value -Depth 10 -Compress
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+        $Response.StatusCode = $StatusCode
+        $Response.ContentType = "application/json; charset=utf-8"
+        $Response.ContentLength64 = $bytes.Length
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $Response.Close()
+    }
+
+    $catalog = Get-LibraryCatalog
+    $catalogJson = @{ sections = $catalog.Sections; targets = $catalog.Targets; root = $root } | ConvertTo-Json -Depth 10 -Compress
+    $catalogJson = $catalogJson -replace '</script>', '<\/script>'
+    $safeTitle = [Net.WebUtility]::HtmlEncode((Split-Path -Leaf $root))
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111315">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>$safeTitle - File Library</title>
+<style>
+  :root { color-scheme: dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { position: relative; isolation: isolate; min-height: 100vh; margin: 0; padding: 18px 44px 36px; background: #111315; color: #f1f2f4; font-family: 'Segoe UI', system-ui, sans-serif; }
+  body::before { content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none; background: radial-gradient(circle at 12% 8%, rgba(220,225,232,.14), transparent 31%), radial-gradient(circle at 82% 14%, rgba(129,147,168,.11), transparent 29%), linear-gradient(145deg, #111315, #1b1e22 58%, #121416); }
+  :root[data-theme="light"] body { background: #eaf0f5; color: #24364b; }
+  :root[data-theme="light"] body::before { background: radial-gradient(circle at 12% 8%, rgba(255,255,255,.95), transparent 31%), radial-gradient(circle at 82% 14%, rgba(157,201,233,.35), transparent 29%), linear-gradient(145deg, #eaf0f5, #dce9f3 58%, #edf3f8); }
+  .page-header { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin: 0 auto 28px; padding: 14px 18px; max-width: 1440px; border: 1px solid rgba(255,255,255,.15); border-radius: 18px; background: rgba(37,40,46,.65); backdrop-filter: blur(20px); }
+  :root[data-theme="light"] .page-header { background: rgba(255,255,255,.62); border-color: rgba(104,140,174,.25); }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 180px; }
+  .brand-mark { width: 38px; height: 38px; display: grid; place-items: center; }
+  .brand-mark img { width: 34px; height: 34px; }
+  .brand-copy h1 { margin: 0; font-size: 17px; }
+  .brand-copy span { font-size: 11px; opacity: .7; overflow-wrap: anywhere; }
+  .header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+  .sort-control { display: inline-flex; align-items: center; gap: 7px; }
+  .sort-control label { font-size: 11px; font-weight: 600; }
+  .sort-control select, .header-button { min-height: 34px; padding: 7px 10px; border: 1px solid rgba(239,242,247,.2); border-radius: 9px; color: inherit; font: inherit; font-size: 11px; background: rgba(255,255,255,.08); }
+  .sort-control select { cursor: pointer; }
+  .sort-control select option { background: #25282e; color: #f1f2f4; }
+  .header-button { cursor: pointer; }
+  .header-button:hover:not(:disabled) { background: rgba(255,255,255,.2); }
+  .header-button:disabled { opacity: .6; cursor: wait; }
+  .theme-control { display: inline-flex; align-items: center; gap: 8px; }
+  .theme-label { font-size: 10px; font-weight: 650; opacity: .72; }
+  .theme-switch { position: relative; width: 68px; height: 34px; flex: 0 0 68px; padding: 0; border: 1px solid rgba(239,242,247,.2); border-radius: 999px; color: inherit; background: #252a31; cursor: pointer; box-shadow: inset 0 2px 5px rgba(0,0,0,.24); }
+  .theme-switch-track { position: absolute; inset: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; font-size: 13px; pointer-events: none; }
+  .theme-switch-knob { position: absolute; left: 3px; top: 3px; width: 26px; height: 26px; border-radius: 50%; background: #dce6f0; box-shadow: 0 2px 7px rgba(0,0,0,.3); transition: transform .2s ease, background .2s ease; }
+  .theme-switch[aria-checked="true"] .theme-switch-knob { transform: translateX(34px); background: #fff1c7; }
+  :root[data-theme="light"] .theme-switch { border-color: rgba(104,140,174,.3); background: #dce9f3; }
+  :root[data-theme="light"] .sort-control select, :root[data-theme="light"] .header-button { border-color: rgba(104,140,174,.3); background: rgba(255,255,255,.65); }
+  #workspace { display: flex; align-items: stretch; gap: 0; max-width: 1600px; min-height: calc(100vh - 124px); margin: auto; }
+  #main-content { flex: 1 1 auto; min-width: 0; padding: 0 16px 24px 0; }
+  #app { max-width: 1440px; margin: auto; }
+  #tree-pane { position: sticky; top: 12px; flex: 0 0 auto; width: 45vw; height: calc(100vh - 124px); min-width: 240px; max-width: 55vw; align-self: flex-start; overflow: hidden; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; background: rgba(31,34,39,.88); box-shadow: 0 18px 48px rgba(0,0,0,.2); animation: pane-in .16s ease-out; }
+  :root[data-theme="light"] #tree-pane { border-color: rgba(104,140,174,.25); background: rgba(248,251,254,.94); box-shadow: 0 18px 48px rgba(74,105,139,.12); }
+  @keyframes pane-in { from { opacity: .5; transform: translateX(8px); } to { opacity: 1; transform: translateX(0); } }
+  #tree-resizer { flex: 0 0 9px; position: relative; cursor: col-resize; touch-action: none; }
+  #tree-resizer::after { content: ''; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px; border-radius: 2px; background: transparent; transition: background .15s; }
+  #tree-resizer:hover::after, #tree-resizer.dragging::after { background: #88b9e4; }
+  .tree-header { display: flex; align-items: center; justify-content: space-between; min-height: 49px; padding: 0 11px 0 16px; border-bottom: 1px solid rgba(255,255,255,.1); }
+  :root[data-theme="light"] .tree-header { border-bottom-color: rgba(104,140,174,.2); }
+  .tree-heading { font-size: 10px; font-weight: 750; letter-spacing: 1.1px; opacity: .78; text-transform: uppercase; }
+  .icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; border: 1px solid transparent; border-radius: 8px; color: inherit; background: transparent; font: inherit; font-size: 19px; line-height: 1; cursor: pointer; }
+  .icon-button:hover { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.09); }
+  #tree-content { height: calc(100% - 50px); overflow: auto; padding: 9px 8px 16px; }
+  .tree-list { list-style: none; margin: 0; padding: 0; }
+  .tree-children { list-style: none; margin: 1px 0 2px 13px; padding: 0 0 0 8px; border-left: 1px solid rgba(255,255,255,.1); }
+  :root[data-theme="light"] .tree-children { border-left-color: rgba(104,140,174,.22); }
+  .tree-row { display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%; padding: 6px 7px; border: 0; border-radius: 7px; color: inherit; background: transparent; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
+  summary.tree-row { list-style: none; }
+  summary.tree-row::-webkit-details-marker { display: none; }
+  details[open] > summary .tree-caret { transform: rotate(90deg); }
+  .tree-caret { transition: transform .12s ease; }
+  .tree-row:hover { background: rgba(255,255,255,.08); }
+  .tree-row.active { background: rgba(112,162,207,.18); color: #b9dcfb; }
+  :root[data-theme="light"] .tree-row.active { color: #245982; background: rgba(94,157,210,.15); }
+  .tree-caret { flex: 0 0 13px; color: #91a5b7; font-size: 10px; text-align: center; }
+  .tree-folder-icon { flex: 0 0 15px; color: #e6bd78; }
+  .tree-file-icon { flex: 0 0 15px; color: #a6b8ca; font-size: 13px; text-align: center; }
+  .tree-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-count { margin-left: auto; color: #8f9aa7; font-size: 10px; }
+  #workspace.tree-hidden #tree-pane, #workspace.tree-hidden #tree-resizer { display: none; }
+  #workspace.tree-hidden #main-content { padding-right: 0; }
+  #workspace.tree-hidden #app { max-width: 1440px; }
+  .tree-toggle { display: inline-flex; align-items: center; gap: 7px; }
+  .tree-toggle svg { width: 15px; height: 15px; }
+  .series { margin-bottom: 38px; }
+  .series h2 { font-size: 15px; color: #d2d5dc; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid rgba(232,235,240,.16); padding-bottom: 10px; margin-bottom: 16px; overflow-wrap: anywhere; }
+  :root[data-theme="light"] .series h2 { color: #42688d; border-bottom-color: rgba(75,112,147,.2); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px; }
+  .card { min-width: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(238,241,246,.19); border-radius: 15px; background: linear-gradient(155deg, rgba(255,255,255,.12), rgba(255,255,255,.045) 48%, rgba(190,197,208,.07)); box-shadow: 0 14px 34px rgba(7,5,16,.22); backdrop-filter: blur(14px); transition: transform .2s, border-color .2s; }
+  .card:hover { transform: translateY(-3px); border-color: rgba(232,236,243,.5); }
+  :root[data-theme="light"] .card { background: linear-gradient(155deg, rgba(255,255,255,.85), rgba(255,255,255,.48) 48%, rgba(207,230,249,.42)); border-color: rgba(255,255,255,.88); box-shadow: 0 14px 34px rgba(74,105,139,.12); }
+  .thumb { width: 100%; height: 142px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(160deg,#383c43,#22252a); }
+  :root[data-theme="light"] .thumb { background: linear-gradient(160deg,#e5f1fb,#cbdff0); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .placeholder { color: #aeb4bf; font-size: 24px; font-weight: 800; letter-spacing: 1px; overflow-wrap: anywhere; padding: 12px; text-align: center; }
+  :root[data-theme="light"] .placeholder { color: #7792aa; }
+  .info { min-width: 0; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .title { font-size: 12px; font-weight: 650; line-height: 1.35; min-height: 32px; overflow-wrap: anywhere; }
+  .metadata { display: flex; justify-content: space-between; gap: 5px; font-size: 10px; opacity: .72; }
+  .card-actions { display: flex; gap: 7px; }
+  .card-actions button, .modal-actions button { flex: 1; min-height: 32px; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; background: rgba(255,255,255,.09); color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
+  .card-actions button:hover, .modal-actions button:hover { background: rgba(255,255,255,.2); }
+  :root[data-theme="light"] .card-actions button, :root[data-theme="light"] .modal-actions button { border-color: rgba(104,140,174,.3); background: rgba(255,255,255,.65); }
+  .add-card { min-height: 300px; align-items: center; justify-content: center; gap: 12px; padding: 20px; border: 1px dashed rgba(234,158,101,.55); color: inherit; text-align: center; cursor: pointer; }
+  .add-card.drag-over { background: rgba(234,158,101,.16); border-color: #ec806d; }
+  .add-title { font-size: 13px; font-weight: 700; }
+  .add-hint { font-size: 11px; opacity: .7; line-height: 1.5; }
+  .add-input { display: none; }
+  .empty { padding: 32px; opacity: .7; text-align: center; }
+  #toast { position: fixed; bottom: 24px; right: 24px; max-width: min(440px, calc(100vw - 32px)); background: #292d33; border: 1px solid rgba(238,241,246,.24); color: #f1f2f4; padding: 12px 18px; border-radius: 12px; font-size: 13px; opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; overflow-wrap: anywhere; }
+  :root[data-theme="light"] #toast { background: #fff; border-color: rgba(125,159,190,.35); color: #263a50; }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  dialog { width: min(460px, calc(100% - 28px)); padding: 0; border: 1px solid rgba(238,241,246,.22); border-radius: 18px; color: #f1f2f4; background: linear-gradient(155deg,#292d34,#202329); box-shadow: 0 22px 80px rgba(0,0,0,.5); }
+  dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(4px); }
+  :root[data-theme="light"] dialog { color: #263a50; background: linear-gradient(155deg,#fff,#edf4fa); border-color: rgba(104,140,174,.25); }
+  .modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 22px 15px; border-bottom: 1px solid rgba(255,255,255,.1); }
+  :root[data-theme="light"] .modal-heading { border-bottom-color: rgba(104,140,174,.18); }
+  .modal-heading h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+  .modal-subtitle { margin: 5px 0 0; color: #aeb8c4; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+  :root[data-theme="light"] .modal-subtitle { color: #62788b; }
+  .modal-body { padding: 16px 22px 20px; }
+  .app-list-label { display: block; margin-bottom: 9px; color: #aeb8c4; font-size: 10px; font-weight: 750; letter-spacing: .8px; text-transform: uppercase; }
+  :root[data-theme="light"] .app-list-label { color: #62788b; }
+  #app-list { display: grid; gap: 7px; max-height: min(48vh, 340px); overflow: auto; padding: 2px; }
+  .app-option { display: flex; align-items: center; gap: 11px; width: 100%; padding: 10px 12px; border: 1px solid rgba(255,255,255,.09); border-radius: 11px; color: inherit; background: rgba(255,255,255,.035); text-align: left; font: inherit; cursor: pointer; transition: background .15s, border-color .15s, transform .15s; }
+  .app-option:hover { transform: translateY(-1px); background: rgba(255,255,255,.08); }
+  .app-option.selected { border-color: rgba(112,175,229,.62); background: rgba(91,155,211,.16); box-shadow: inset 0 0 0 1px rgba(112,175,229,.12); }
+  :root[data-theme="light"] .app-option { border-color: rgba(104,140,174,.16); background: rgba(255,255,255,.55); }
+  :root[data-theme="light"] .app-option.selected { border-color: #77acd4; background: #e4f2fc; }
+  .app-icon { display: grid; place-items: center; width: 35px; height: 35px; flex: 0 0 35px; border-radius: 10px; color: #d9edff; background: linear-gradient(145deg,#415f7a,#283e52); font-size: 14px; font-weight: 750; text-transform: uppercase; }
+  .app-option.selected .app-icon { background: linear-gradient(145deg,#4d91c7,#35678f); }
+  :root[data-theme="light"] .app-icon { color: #2e5e82; background: linear-gradient(145deg,#d6eafa,#c1d9ee); }
+  .app-option-copy { min-width: 0; flex: 1; }
+  .app-option-name { display: block; overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .app-option-detail { display: block; margin-top: 3px; color: #9ba8b7; font-size: 10px; }
+  :root[data-theme="light"] .app-option-detail { color: #72869a; }
+  .app-radio { display: grid; place-items: center; width: 17px; height: 17px; flex: 0 0 17px; border: 1px solid rgba(255,255,255,.35); border-radius: 50%; }
+  .app-option.selected .app-radio { border-color: #83bbe9; }
+  .app-option.selected .app-radio::after { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #83bbe9; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px 18px; border-top: 1px solid rgba(255,255,255,.1); }
+  :root[data-theme="light"] .modal-actions { border-top-color: rgba(104,140,174,.18); }
+  .modal-actions button { flex: 0 0 auto; min-width: 94px; min-height: 36px; padding: 0 13px; font-weight: 600; }
+  .modal-actions .primary-action { border-color: #6699c2; color: #fff; background: linear-gradient(145deg,#538cb8,#3a6b91); }
+  .modal-actions .primary-action:hover { background: linear-gradient(145deg,#65a2d2,#477da5); }
+  :root[data-theme="light"] .modal-actions .primary-action { color: #fff; background: linear-gradient(145deg,#4d8fbe,#35749e); }
+  .modal-message { padding: 17px; border: 1px solid rgba(255,255,255,.1); border-radius: 11px; color: #b9c4d0; font-size: 12px; line-height: 1.55; }
+  :root[data-theme="light"] .modal-message { border-color: rgba(104,140,174,.2); color: #526a7e; }
+  .preview-dialog { width: min(1120px, calc(100% - 28px)); max-width: 1120px; max-height: calc(100vh - 28px); overflow: hidden; }
+  .preview-heading { align-items: center; padding: 12px 16px; }
+  .preview-heading h2 { max-width: min(72vw, 760px); overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+  .preview-file-meta { margin-top: 4px; color: #aeb8c4; font-size: 10px; }
+  :root[data-theme="light"] .preview-file-meta { color: #62788b; }
+  #preview-stage { display: flex; align-items: center; justify-content: center; min-height: min(70vh, 720px); max-height: calc(100vh - 116px); overflow: auto; padding: 18px; background: radial-gradient(ellipse at center,#2c3037,#181a1e 78%); }
+  :root[data-theme="light"] #preview-stage { background: radial-gradient(ellipse at center,#e3ebf3,#cfd9e3 78%); }
+  #preview-frame { display: block; width: 100%; height: min(70vh, 720px); border: 0; border-radius: 8px; background: #fff; box-shadow: 0 12px 42px rgba(0,0,0,.3); }
+  #preview-frame.preview-text { background: #fff; }
+  .preview-media-image { display: block; max-width: 100%; max-height: calc(100vh - 160px); object-fit: contain; filter: drop-shadow(0 12px 28px rgba(0,0,0,.28)); }
+  .preview-media-video { display: block; width: 100%; max-height: calc(100vh - 160px); background: #090a0b; border-radius: 9px; }
+  .preview-media-audio { width: min(620px, 100%); }
+  .preview-empty { width: min(460px, 100%); padding: 32px 22px; border: 1px solid rgba(255,255,255,.14); border-radius: 17px; background: rgba(255,255,255,.06); text-align: center; }
+  :root[data-theme="light"] .preview-empty { border-color: rgba(104,140,174,.2); background: rgba(255,255,255,.55); }
+  .preview-empty-icon { margin-bottom: 12px; font-size: 32px; }
+  .preview-empty h3 { margin: 0 0 8px; font-size: 15px; }
+  .preview-empty p { margin: 0; color: #b5c0cc; font-size: 12px; line-height: 1.6; }
+  :root[data-theme="light"] .preview-empty p { color: #62788b; }
+  .preview-actions { align-items: center; justify-content: space-between; }
+  .preview-actions button { min-width: 106px; }
+  @media (max-width: 900px) { #tree-pane { width: 42vw; min-width: 190px; } }
+  @media (max-width: 700px) { body { padding: 10px 12px 24px; } .page-header { align-items: flex-start; flex-direction: column; } .header-actions { width: 100%; justify-content: flex-start; } .sort-control { width: 100%; justify-content: space-between; } .sort-control select { flex: 1; max-width: 70%; } .grid { grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 10px; } #workspace { min-height: calc(100vh - 180px); } #main-content { padding-right: 0; } #tree-pane { position: fixed; z-index: 10; top: 10px; right: 10px; bottom: 10px; width: min(82vw, 340px) !important; max-width: none; min-width: 0; box-shadow: 0 18px 70px rgba(0,0,0,.42); } #tree-resizer { display: none !important; } .preview-dialog { width: calc(100% - 16px); max-height: calc(100vh - 16px); } #preview-stage { min-height: 52vh; max-height: calc(100vh - 120px); padding: 9px; } #preview-frame { height: 66vh; } }
+</style>
+</head>
+<body>
+<header class="page-header">
+  <div class="brand"><div class="brand-mark"><img src="/favicon.svg" alt=""></div><div class="brand-copy"><h1>File Library</h1><span id="root-label"></span></div></div>
+  <div class="header-actions">
+    <div class="sort-control"><label for="sort-by">Sort</label><select id="sort-by"><option value="name">Name</option><option value="added">Date modified</option><option value="size">File size</option></select></div>
+    <div class="sort-control"><label for="sort-order">Order</label><select id="sort-order"><option value="asc">Ascending</option><option value="desc">Descending</option></select></div>
+    <div class="theme-control"><span class="theme-label">Appearance</span><button id="theme-switch" class="theme-switch" type="button" role="switch" aria-checked="false" aria-label="Toggle light and dark appearance"><span class="theme-switch-track"><span aria-hidden="true">&#9790;</span><span aria-hidden="true">&#9728;</span></span><span class="theme-switch-knob"></span></button></div>
+    <button id="toggle-tree" class="header-button tree-toggle" type="button" aria-expanded="false" aria-controls="tree-pane"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="3" width="15" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M7.5 3.5v13" stroke="currentColor" stroke-width="1.5"/><path d="M4.7 6.5h.7M4.7 9.5h.7M4.7 12.5h.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Folder tree</span></button>
+    <button id="refresh-library" class="header-button" type="button">Refresh folder</button>
+  </div>
+</header>
+<div id="workspace" class="tree-hidden">
+  <main id="main-content"><div id="app"></div></main>
+  <div id="tree-resizer" role="separator" aria-label="Resize folder tree" aria-orientation="vertical" tabindex="0" hidden></div>
+  <aside id="tree-pane" aria-label="Folder tree" hidden><div class="tree-header"><span class="tree-heading">Explorer</span><button id="close-tree" class="icon-button" type="button" aria-label="Close folder tree" title="Close folder tree">&times;</button></div><div id="tree-content"></div></aside>
+</div>
+<div id="toast" role="status"></div>
+<dialog id="open-dialog">
+  <div class="modal-heading"><div><h2>Open with</h2><p id="open-filename" class="modal-subtitle"></p></div><button id="dismiss-open" class="icon-button" type="button" aria-label="Close app picker">&times;</button></div>
+  <div class="modal-body"><span class="app-list-label">Apps installed for this file type</span><div id="app-list" role="radiogroup" aria-label="Choose an installed application"></div></div>
+  <div class="modal-actions"><button id="cancel-open" type="button">Cancel</button><button id="launch-file" class="primary-action" type="button">Open file</button></div>
+</dialog>
+<dialog id="preview-dialog" class="preview-dialog">
+  <div class="modal-heading preview-heading"><div><h2 id="preview-title"></h2><div id="preview-file-meta" class="preview-file-meta"></div></div><button id="dismiss-preview" class="icon-button" type="button" aria-label="Close preview">&times;</button></div>
+  <div id="preview-stage"></div>
+  <div class="modal-actions preview-actions"><button id="close-preview" type="button">Close</button><button id="preview-open-with" class="primary-action" type="button">Open with...</button></div>
+</dialog>
+<script>
+const initialCatalog = $catalogJson;
+let data = initialCatalog.sections;
+let sectionTargets = initialCatalog.targets;
+const app = document.getElementById('app');
+const toast = document.getElementById('toast');
+const rootElement = document.documentElement;
+const themeSwitch = document.getElementById('theme-switch');
+const workspace = document.getElementById('workspace');
+const treePane = document.getElementById('tree-pane');
+const treeResizer = document.getElementById('tree-resizer');
+const treeContent = document.getElementById('tree-content');
+const treeToggle = document.getElementById('toggle-tree');
+const sortBy = document.getElementById('sort-by');
+const sortOrder = document.getElementById('sort-order');
+const refreshButton = document.getElementById('refresh-library');
+const openDialog = document.getElementById('open-dialog');
+const appList = document.getElementById('app-list');
+const previewDialog = document.getElementById('preview-dialog');
+let toastTimer = null;
+let activeFile = null;
+let activePreviewFile = null;
+let selectedAppId = 'default';
+let refreshing = false;
+let treeResizeActive = false;
+const folderSectionIds = new Map();
+const fileDomIds = new Map();
+document.getElementById('root-label').textContent = initialCatalog.root;
+const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function showToast(message) {
+  toast.textContent = message;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 2400);
+}
+
+function setTheme(theme, save) {
+  rootElement.dataset.theme = theme;
+  themeSwitch.setAttribute('aria-checked', String(theme === 'light'));
+  if (save) {
+    try { localStorage.setItem('fileLibraryTheme', theme); }
+    catch (error) { console.warn('Could not save theme preference:', error); }
+  }
+}
+let savedTheme = 'dark';
+try {
+  const stored = localStorage.getItem('fileLibraryTheme');
+  if (stored === 'light' || stored === 'dark') savedTheme = stored;
+} catch (error) { console.warn('Could not read theme preference:', error); }
+setTheme(savedTheme, false);
+themeSwitch.addEventListener('click', () => setTheme(rootElement.dataset.theme === 'light' ? 'dark' : 'light', true));
+
+function fileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let amount = bytes;
+  let index = -1;
+  do { amount /= 1024; index++; } while (amount >= 1024 && index < units.length - 1);
+  return amount.toFixed(amount < 10 ? 1 : 0) + ' ' + units[index];
+}
+function sortFiles(files) {
+  const direction = sortOrder.value === 'desc' ? -1 : 1;
+  return [...files].sort((left, right) => {
+    let comparison = 0;
+    if (sortBy.value === 'size') comparison = left.size - right.size;
+    else if (sortBy.value === 'added') comparison = Date.parse(left.added) - Date.parse(right.added);
+    else comparison = naturalCompare.compare(left.name, right.name);
+    return comparison * direction || naturalCompare.compare(left.name, right.name);
+  });
+}
+
+function renderFolderTree() {
+  const rootPath = initialCatalog.root.replace(/[\\/]+$/, '');
+  const rootNode = { name: rootPath.split(/[\\/]/).pop() || rootPath, path: initialCatalog.root, children: new Map(), sectionName: null, files: [] };
+  for (const [sectionName, targetPath] of Object.entries(sectionTargets)) {
+    const target = String(targetPath);
+    const relativePath = target.toLowerCase().startsWith(rootPath.toLowerCase())
+      ? target.slice(rootPath.length).replace(/^[\\/]+/, '')
+      : '';
+    const parts = relativePath ? relativePath.split(/[\\/]+/).filter(Boolean) : [];
+    let node = rootNode;
+    let currentPath = initialCatalog.root;
+    for (const part of parts) {
+      currentPath += (currentPath.endsWith('\\') || currentPath.endsWith('/') ? '' : '\\') + part;
+      if (!node.children.has(part.toLowerCase())) {
+        node.children.set(part.toLowerCase(), { name: part, path: currentPath, children: new Map(), sectionName: null, files: [] });
+      }
+      node = node.children.get(part.toLowerCase());
+    }
+    node.sectionName = sectionName;
+    node.files = data[sectionName] || [];
+  }
+
+  function makeTreeBranch(node, isRoot) {
+    const item = document.createElement('li');
+    const details = document.createElement('details');
+    details.open = isRoot;
+    const summary = document.createElement('summary');
+    summary.className = 'tree-row';
+    summary.title = node.path;
+    const caret = document.createElement('span');
+    caret.className = 'tree-caret';
+    caret.textContent = node.children.size ? '\u25B8' : '';
+    const folderIcon = document.createElement('span');
+    folderIcon.className = 'tree-folder-icon';
+    folderIcon.textContent = '\uD83D\uDCC1';
+    const label = document.createElement('span');
+    label.className = 'tree-label';
+    label.textContent = node.name;
+    summary.append(caret, folderIcon, label);
+    const folderId = folderSectionIds.get(node.path.toLowerCase());
+    const sectionName = Object.keys(sectionTargets).find(name => String(sectionTargets[name]).toLowerCase() === node.path.toLowerCase());
+    if (sectionName && data[sectionName]) {
+      const count = document.createElement('span');
+      count.className = 'tree-count';
+      count.textContent = String(data[sectionName].length);
+      summary.appendChild(count);
+    }
+    if (folderId && document.getElementById(folderId)) summary.classList.add('active');
+    summary.addEventListener('click', () => {
+      if (folderId) {
+        document.querySelectorAll('.tree-row.active').forEach(row => row.classList.remove('active'));
+        summary.classList.add('active');
+        const section = document.getElementById(folderId);
+        if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+    details.appendChild(summary);
+
+    const children = [...node.children.values()].sort((left, right) => naturalCompare.compare(left.name, right.name));
+    if (children.length || node.files.length) {
+      const nested = document.createElement('ul');
+      nested.className = 'tree-children';
+      for (const child of children) nested.appendChild(makeTreeBranch(child, false));
+      for (const file of sortFiles(node.files)) {
+        const fileItem = document.createElement('li');
+        const fileRow = document.createElement('button');
+        fileRow.type = 'button';
+        fileRow.className = 'tree-row file-tree-row';
+        fileRow.title = file.path;
+        const fileIcon = document.createElement('span');
+        fileIcon.className = 'tree-file-icon';
+        fileIcon.textContent = '\uD83D\uDCC4';
+        const fileLabel = document.createElement('span');
+        fileLabel.className = 'tree-label';
+        fileLabel.textContent = file.name;
+        fileRow.append(fileIcon, fileLabel);
+        fileRow.addEventListener('click', () => {
+          document.querySelectorAll('.tree-row.active').forEach(row => row.classList.remove('active'));
+          fileRow.classList.add('active');
+          const fileElement = document.getElementById(fileDomIds.get(file.path.toLowerCase()));
+          if (fileElement) fileElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        fileItem.appendChild(fileRow);
+        nested.appendChild(fileItem);
+      }
+      details.appendChild(nested);
+    }
+    item.appendChild(details);
+    return item;
+  }
+
+  const list = document.createElement('ul');
+  list.className = 'tree-list';
+  list.appendChild(makeTreeBranch(rootNode, true));
+  treeContent.replaceChildren(list);
+}
+
+function renderCatalog(nextData, nextTargets) {
+  data = nextData;
+  if (nextTargets) sectionTargets = nextTargets;
+  app.replaceChildren();
+  folderSectionIds.clear();
+  fileDomIds.clear();
+  const sectionNames = Object.keys(data).sort(naturalCompare.compare);
+  if (!sectionNames.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'This folder is empty.';
+    app.appendChild(empty);
+    renderFolderTree();
+    return;
+  }
+  for (const [sectionIndex, sectionName] of sectionNames.entries()) {
+    const section = document.createElement('section');
+    section.className = 'series';
+    section.id = 'folder-section-' + sectionIndex;
+    section.dataset.folderPath = sectionTargets[sectionName] || '';
+    if (section.dataset.folderPath) folderSectionIds.set(section.dataset.folderPath.toLowerCase(), section.id);
+    const heading = document.createElement('h2');
+    heading.textContent = sectionName;
+    section.appendChild(heading);
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    for (const [fileIndex, file] of sortFiles(data[sectionName]).entries()) {
+      const card = document.createElement('article');
+      card.className = 'card';
+      card.id = 'file-entry-' + sectionIndex + '-' + fileIndex;
+      fileDomIds.set(file.path.toLowerCase(), card.id);
+      const thumb = document.createElement('div');
+      thumb.className = 'thumb';
+      if (file.image) {
+        const image = document.createElement('img');
+        image.src = '/preview?path=' + encodeURIComponent(file.path);
+        image.alt = '';
+        image.loading = 'lazy';
+        thumb.appendChild(image);
+      } else {
+        const placeholder = document.createElement('span');
+        placeholder.className = 'placeholder';
+        placeholder.textContent = file.ext;
+        thumb.appendChild(placeholder);
+      }
+      const info = document.createElement('div');
+      info.className = 'info';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = file.name;
+      const metadata = document.createElement('div');
+      metadata.className = 'metadata';
+      metadata.innerHTML = '<span></span><span></span>';
+      metadata.children[0].textContent = file.ext;
+      metadata.children[1].textContent = fileSize(file.size);
+      const actions = document.createElement('div');
+      actions.className = 'card-actions';
+      const preview = document.createElement('button');
+      preview.type = 'button';
+      preview.textContent = 'Preview';
+      preview.addEventListener('click', () => showPreview(file));
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.textContent = 'Open with...';
+      open.addEventListener('click', () => chooseApp(file));
+      actions.append(preview, open);
+      info.append(title, metadata, actions);
+      card.append(thumb, info);
+      grid.appendChild(card);
+    }
+    const addCard = document.createElement('div');
+    addCard.className = 'card add-card';
+    addCard.tabIndex = 0;
+    addCard.setAttribute('role', 'button');
+    addCard.setAttribute('aria-label', 'Add files to ' + sectionName);
+    const addTitle = document.createElement('span');
+    addTitle.className = 'add-title';
+    addTitle.textContent = 'Add files to this folder';
+    const addHint = document.createElement('span');
+    addHint.className = 'add-hint';
+    addHint.textContent = 'Drop any file here or click to browse';
+    const fileInput = document.createElement('input');
+    fileInput.className = 'add-input';
+    fileInput.type = 'file';
+    fileInput.multiple = true;
+    fileInput.addEventListener('click', event => event.stopPropagation());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length) uploadFiles(fileInput.files, sectionTargets[sectionName]);
+      fileInput.value = '';
+    });
+    addCard.append(addTitle, addHint, fileInput);
+    addCard.addEventListener('click', () => fileInput.click());
+    addCard.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        fileInput.click();
+      }
+    });
+    addCard.addEventListener('dragover', event => {
+      event.preventDefault();
+      addCard.classList.add('drag-over');
+    });
+    addCard.addEventListener('dragleave', event => {
+      if (!addCard.contains(event.relatedTarget)) addCard.classList.remove('drag-over');
+    });
+    addCard.addEventListener('drop', event => {
+      event.preventDefault();
+      addCard.classList.remove('drag-over');
+      if (event.dataTransfer.files.length) uploadFiles(event.dataTransfer.files, sectionTargets[sectionName]);
+    });
+    grid.appendChild(addCard);
+    section.appendChild(grid);
+    app.appendChild(section);
+  }
+  renderFolderTree();
+}
+
+async function uploadFiles(fileList, targetFolder) {
+  if (!targetFolder) {
+    showToast('Could not find the destination folder. Refresh and try again.');
+    return;
+  }
+  const files = Array.from(fileList);
+  refreshButton.disabled = true;
+  let added = 0;
+  const failures = [];
+  try {
+    for (const file of files) {
+      refreshButton.textContent = 'Adding ' + (added + 1) + '/' + files.length + '...';
+      try {
+        const query = '?folder=' + encodeURIComponent(targetFolder) + '&name=' + encodeURIComponent(file.name);
+        const response = await fetch('/upload' + query, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: file
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Upload failed.');
+        added++;
+      } catch (error) { failures.push(file.name + ': ' + error.message); }
+    }
+    if (added) {
+      const response = await fetch('/library', { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not refresh the folder.');
+      renderCatalog(result.sections, result.targets);
+    }
+    if (failures.length) {
+      showToast(added + ' file(s) added; ' + failures.length + ' failed.');
+      console.error('Some file uploads failed:', failures);
+    } else {
+      showToast(added + ' file(s) added.');
+    }
+  } catch (error) {
+    showToast(error.message);
+    console.error('Could not complete file upload:', error);
+  } finally {
+    refreshButton.disabled = false;
+    refreshButton.textContent = 'Refresh folder';
+  }
+}
+
+async function chooseApp(file) {
+  activeFile = file;
+  document.getElementById('open-filename').textContent = file.name;
+  selectedAppId = 'default';
+  appList.replaceChildren();
+  const loading = document.createElement('div');
+  loading.className = 'modal-message';
+  loading.textContent = 'Looking up apps registered on this PC for .' + (file.ext === 'FILE' ? 'unknown' : file.ext.toLowerCase()) + ' files...';
+  appList.appendChild(loading);
+  openDialog.showModal();
+  try {
+    const response = await fetch('/apps?path=' + encodeURIComponent(file.path), { cache: 'no-store' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Could not find apps.');
+    appList.replaceChildren();
+    for (const appInfo of result.apps) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'app-option' + (appInfo.id === 'default' ? ' selected' : '');
+      option.setAttribute('role', 'radio');
+      option.setAttribute('aria-checked', String(appInfo.id === 'default'));
+      const icon = document.createElement('span');
+      icon.className = 'app-icon';
+      icon.textContent = appInfo.id === 'default' ? 'OS' : appInfo.name.slice(0, 2);
+      const copy = document.createElement('span');
+      copy.className = 'app-option-copy';
+      const name = document.createElement('span');
+      name.className = 'app-option-name';
+      name.textContent = appInfo.name;
+      const detail = document.createElement('span');
+      detail.className = 'app-option-detail';
+      detail.textContent = appInfo.id === 'default' ? 'Use the Windows default app' : 'Installed on this PC';
+      const radio = document.createElement('span');
+      radio.className = 'app-radio';
+      copy.append(name, detail);
+      option.append(icon, copy, radio);
+      option.addEventListener('click', () => {
+        selectedAppId = appInfo.id;
+        appList.querySelectorAll('.app-option').forEach(item => {
+          const selected = item === option;
+          item.classList.toggle('selected', selected);
+          item.setAttribute('aria-checked', String(selected));
+        });
+      });
+      appList.appendChild(option);
+    }
+  } catch (error) {
+    openDialog.close();
+    showToast(error.message);
+  }
+}
+
+async function launchFile() {
+  if (!activeFile) return;
+  const button = document.getElementById('launch-file');
+  button.disabled = true;
+  try {
+    const response = await fetch('/open?path=' + encodeURIComponent(activeFile.path) + '&app=' + encodeURIComponent(selectedAppId), { cache: 'no-store' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Could not open file.');
+    openDialog.close();
+    showToast('Opened ' + activeFile.name);
+  } catch (error) {
+    showToast(error.message);
+  } finally { button.disabled = false; }
+}
+document.getElementById('launch-file').addEventListener('click', launchFile);
+document.getElementById('cancel-open').addEventListener('click', () => openDialog.close());
+document.getElementById('dismiss-open').addEventListener('click', () => openDialog.close());
+
+function showPreview(file) {
+  activePreviewFile = file;
+  document.getElementById('preview-title').textContent = file.name;
+  document.getElementById('preview-file-meta').textContent = file.ext + ' | ' + fileSize(file.size);
+  const stage = document.getElementById('preview-stage');
+  stage.replaceChildren();
+  if (file.previewKind === 'unsupported') {
+    const empty = document.createElement('div');
+    empty.className = 'preview-empty';
+    const icon = document.createElement('div');
+    icon.className = 'preview-empty-icon';
+    icon.textContent = '\u25A4';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Preview is not available for this file';
+    const message = document.createElement('p');
+    message.textContent = 'This file type cannot be displayed safely in the browser. Choose an installed app with "Open with..." to view it.';
+    empty.append(icon, heading, message);
+    stage.appendChild(empty);
+  } else if (file.previewKind === 'image') {
+    const image = document.createElement('img');
+    image.className = 'preview-media-image';
+    image.src = '/preview?path=' + encodeURIComponent(file.path);
+    image.alt = file.name;
+    stage.appendChild(image);
+  } else if (file.previewKind === 'audio' || file.previewKind === 'video') {
+    const media = document.createElement(file.previewKind);
+    media.className = 'preview-media-' + file.previewKind;
+    media.controls = true;
+    media.preload = 'metadata';
+    media.src = '/preview?path=' + encodeURIComponent(file.path);
+    stage.appendChild(media);
+  } else {
+    const frame = document.createElement('iframe');
+    if (file.previewKind === 'text') frame.setAttribute('sandbox', 'allow-same-origin');
+    frame.id = 'preview-frame';
+    frame.title = 'Preview of ' + file.name;
+    frame.className = 'preview-' + file.previewKind;
+    frame.src = '/preview?path=' + encodeURIComponent(file.path);
+    stage.appendChild(frame);
+  }
+  previewDialog.showModal();
+}
+document.getElementById('close-preview').addEventListener('click', () => {
+  previewDialog.close();
+});
+document.getElementById('dismiss-preview').addEventListener('click', () => previewDialog.close());
+document.getElementById('preview-open-with').addEventListener('click', () => {
+  if (!activePreviewFile) return;
+  const file = activePreviewFile;
+  previewDialog.close();
+  chooseApp(file);
+});
+previewDialog.addEventListener('close', () => {
+  document.getElementById('preview-stage').replaceChildren();
+});
+
+function setTreeOpen(open) {
+  workspace.classList.toggle('tree-hidden', !open);
+  treePane.hidden = !open;
+  treeResizer.hidden = !open;
+  treeToggle.setAttribute('aria-expanded', String(open));
+  if (open) {
+    try {
+      const savedWidth = Number(localStorage.getItem('fileLibraryTreeWidth'));
+      const width = Number.isFinite(savedWidth) && savedWidth >= 190
+        ? savedWidth
+        : Math.round(Math.min(window.innerWidth * .45, window.innerWidth * .55));
+      treePane.style.width = Math.max(240, Math.min(width, window.innerWidth * .55)) + 'px';
+    } catch (error) { console.warn('Could not read folder tree width:', error); }
+  }
+}
+treeToggle.addEventListener('click', () => setTreeOpen(workspace.classList.contains('tree-hidden')));
+document.getElementById('close-tree').addEventListener('click', () => setTreeOpen(false));
+treeResizer.addEventListener('pointerdown', event => {
+  treeResizeActive = true;
+  treeResizer.classList.add('dragging');
+  treeResizer.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+treeResizer.addEventListener('pointermove', event => {
+  if (!treeResizeActive) return;
+  const bounds = workspace.getBoundingClientRect();
+  const width = Math.max(190, Math.min(window.innerWidth * .55, bounds.right - event.clientX));
+  treePane.style.width = width + 'px';
+});
+function finishTreeResize(event) {
+  if (!treeResizeActive) return;
+  treeResizeActive = false;
+  treeResizer.classList.remove('dragging');
+  if (event && treeResizer.hasPointerCapture(event.pointerId)) treeResizer.releasePointerCapture(event.pointerId);
+  try { localStorage.setItem('fileLibraryTreeWidth', String(Math.round(treePane.getBoundingClientRect().width))); }
+  catch (error) { console.warn('Could not save folder tree width:', error); }
+}
+treeResizer.addEventListener('pointerup', finishTreeResize);
+treeResizer.addEventListener('pointercancel', finishTreeResize);
+treeResizer.addEventListener('keydown', event => {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  const change = event.key === 'ArrowLeft' ? 24 : -24;
+  treePane.style.width = Math.max(190, Math.min(window.innerWidth * .55, treePane.getBoundingClientRect().width + change)) + 'px';
+  try { localStorage.setItem('fileLibraryTreeWidth', String(Math.round(treePane.getBoundingClientRect().width))); }
+  catch (error) { console.warn('Could not save folder tree width:', error); }
+});
+
+async function refreshLibrary() {
+  if (refreshing) return;
+  refreshing = true;
+  refreshButton.disabled = true;
+  refreshButton.textContent = 'Scanning...';
+  try {
+    const response = await fetch('/library', { cache: 'no-store' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Could not refresh folder.');
+    renderCatalog(result.sections, result.targets);
+    showToast('Folder refreshed.');
+  } catch (error) {
+    showToast(error.message);
+    console.error('Could not refresh folder:', error);
+  } finally {
+    refreshing = false;
+    refreshButton.disabled = false;
+    refreshButton.textContent = 'Refresh folder';
+  }
+}
+refreshButton.addEventListener('click', refreshLibrary);
+sortBy.addEventListener('change', () => renderCatalog(data));
+sortOrder.addEventListener('change', () => renderCatalog(data));
+renderCatalog(data, sectionTargets);
+function heartbeat() { fetch('/heartbeat', { cache: 'no-store' }).catch(() => {}); }
+heartbeat();
+setInterval(heartbeat, 5000);
+window.addEventListener('pagehide', () => navigator.sendBeacon('/page-close', ''));
+</script>
+</body>
+</html>
+"@
+
+    $listener = New-Object System.Net.HttpListener
+    $listener.Prefixes.Add($url)
+    $listener.Start()
+    if ($edgePath) {
+        Start-Process -FilePath $edgePath -ArgumentList "--app=$url"
+    } else {
+        Start-Process $url
+    }
+
+    Write-Host "Browsing $root"
+    Write-Host "Close the browser tab or window to stop the local server."
+    $lastHeartbeat = Get-Date
+    $pageCloseRequested = $null
+    $pending = $listener.BeginGetContext($null, $null)
+    while ($listener.IsListening) {
+        if (-not $pending.AsyncWaitHandle.WaitOne(500)) {
+            if ($pageCloseRequested -and ((Get-Date) - $pageCloseRequested).TotalSeconds -ge 5) { break }
+            if (((Get-Date) - $lastHeartbeat).TotalSeconds -ge 60) { break }
+            continue
+        }
+
+        $context = $listener.EndGetContext($pending)
+        $request = $context.Request
+        $response = $context.Response
+        $path = $request.Url.AbsolutePath
+        if ($path -eq '/heartbeat') {
+            $lastHeartbeat = Get-Date
+            $pageCloseRequested = $null
+            $response.StatusCode = 204
+            $response.Close()
+        }
+        elseif ($path -eq '/page-close') {
+            $pageCloseRequested = Get-Date
+            $response.StatusCode = 204
+            $response.Close()
+        }
+        elseif ($path -eq '/favicon.svg') {
+            try {
+                $faviconPath = Join-Path $PSScriptRoot 'opened-book-4983.svg'
+                $bytes = [IO.File]::ReadAllBytes($faviconPath)
+                $response.ContentType = 'image/svg+xml'
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+                $response.Close()
+            } catch {
+                $response.StatusCode = 404
+                $response.Close()
+            }
+        }
+        elseif ($path -eq '/library') {
+            try {
+                $fresh = Get-LibraryCatalog
+                $value = @{ sections = $fresh.Sections; targets = $fresh.Targets; root = $root }
+                Write-JsonResponse -Response $response -Value $value
+                Write-Host "Folder refreshed: $($fresh.Count) file(s)."
+            } catch {
+                Write-JsonResponse -Response $response -Value @{ error = $_.Exception.Message } -StatusCode 500
+            }
+        }
+        elseif ($path -eq '/apps') {
+            try {
+                $filePath = Get-QueryValue -Query $request.Url.Query -Name 'path'
+                if (-not $filePath -or -not (Test-PathWithinRoot -Path $filePath) -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                    throw "The file is outside the selected folder or no longer exists."
+                }
+                $extension = [IO.Path]::GetExtension($filePath)
+                $apps = if ($extension) { Get-InstalledAppsForExtension -Extension $extension } else { @([PSCustomObject]@{ id = 'default'; name = 'Windows default app' }) }
+                Write-JsonResponse -Response $response -Value @{ apps = $apps }
+            } catch {
+                Write-JsonResponse -Response $response -Value @{ error = $_.Exception.Message } -StatusCode 400
+            }
+        }
+        elseif ($path -eq '/upload') {
+            $destinationPath = $null
+            try {
+                $targetFolder = Get-QueryValue -Query $request.Url.Query -Name 'folder'
+                $fileName = Get-QueryValue -Query $request.Url.Query -Name 'name'
+                if (-not $targetFolder -or -not (Test-PathWithinRoot -Path $targetFolder) -or -not (Test-Path -LiteralPath $targetFolder -PathType Container)) {
+                    throw "The destination folder is outside the selected folder or no longer exists."
+                }
+                if ([string]::IsNullOrWhiteSpace($fileName) -or [IO.Path]::GetFileName($fileName) -ne $fileName) {
+                    throw "Invalid filename."
+                }
+                $destinationPath = Join-Path $targetFolder $fileName
+                if (Test-Path -LiteralPath $destinationPath) {
+                    $baseName = [IO.Path]::GetFileNameWithoutExtension($fileName)
+                    $extension = [IO.Path]::GetExtension($fileName)
+                    $suffix = 2
+                    do {
+                        $destinationPath = Join-Path $targetFolder ("{0} ({1}){2}" -f $baseName, $suffix, $extension)
+                        $suffix++
+                    } while (Test-Path -LiteralPath $destinationPath)
+                }
+                $fileStream = [IO.File]::Open($destinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $request.InputStream.CopyTo($fileStream) } finally { $fileStream.Dispose() }
+                Write-JsonResponse -Response $response -Value @{ name = [IO.Path]::GetFileName($destinationPath) }
+                Write-Host "Added file: $destinationPath"
+            } catch {
+                if ($destinationPath -and (Test-Path -LiteralPath $destinationPath -PathType Leaf)) {
+                    Remove-Item -LiteralPath $destinationPath -Force -ErrorAction SilentlyContinue
+                }
+                Write-JsonResponse -Response $response -Value @{ error = $_.Exception.Message } -StatusCode 400
+            }
+        }
+        elseif ($path -eq '/open') {
+            try {
+                $filePath = Get-QueryValue -Query $request.Url.Query -Name 'path'
+                $appId = Get-QueryValue -Query $request.Url.Query -Name 'app'
+                if (-not $filePath -or -not (Test-PathWithinRoot -Path $filePath) -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                    throw "The file is outside the selected folder or no longer exists."
+                }
+                if (-not $appId -or $appId -eq 'default') {
+                    Start-Process -FilePath $filePath -ErrorAction Stop
+                } else {
+                    $selectedApp = $script:appCatalogById[$appId]
+                    if (-not $selectedApp -or -not (Test-Path -LiteralPath $selectedApp.Executable -PathType Leaf)) {
+                        throw "That app is no longer available. Reopen the app list and try again."
+                    }
+                    $arguments = $selectedApp.Arguments
+                    $quotedFilePath = '"' + $filePath + '"'
+                    if ($arguments -match '"%[1lL]"') {
+                        $arguments = [regex]::Replace($arguments, '"%[1lL]"', [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $quotedFilePath })
+                    } elseif ($arguments -match '%[1lL]') {
+                        $arguments = [regex]::Replace($arguments, '%[1lL]', [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $quotedFilePath })
+                    } else {
+                        $arguments = ($arguments + ' ' + $quotedFilePath).Trim()
+                    }
+                    Start-Process -FilePath $selectedApp.Executable -ArgumentList $arguments -ErrorAction Stop
+                }
+                Write-JsonResponse -Response $response -Value @{ ok = $true }
+                Write-Host "Opened: $filePath"
+            } catch {
+                Write-JsonResponse -Response $response -Value @{ error = $_.Exception.Message } -StatusCode 400
+            }
+        }
+        elseif ($path -eq '/preview') {
+            try {
+                $filePath = Get-QueryValue -Query $request.Url.Query -Name 'path'
+                if (-not $filePath -or -not (Test-PathWithinRoot -Path $filePath) -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                    throw "The file is outside the selected folder or no longer exists."
+                }
+                $contentType = Get-ContentType -Extension ([IO.Path]::GetExtension($filePath))
+                $response.ContentType = $contentType
+                $response.Headers.Add('X-Content-Type-Options', 'nosniff')
+                if ([IO.Path]::GetExtension($filePath).ToLowerInvariant() -ne '.pdf') {
+                    $response.Headers.Add('Content-Security-Policy', "default-src 'none'; sandbox")
+                }
+                $response.Headers.Add('Content-Disposition', 'inline; filename="' + [IO.Path]::GetFileName($filePath).Replace('"', '') + '"')
+                $fileStream = [IO.File]::OpenRead($filePath)
+                try {
+                    $totalLength = $fileStream.Length
+                    $rangeHeader = [string]$request.Headers['Range']
+                    $rangeMatch = [regex]::Match($rangeHeader, '^bytes=(\d*)-(\d*)$')
+                    $start = [long]0
+                    $end = $totalLength - 1
+                    $validRange = $true
+                    if ($rangeMatch.Success) {
+                        if (-not $rangeMatch.Groups[1].Value) {
+                            $suffixLength = [long]$rangeMatch.Groups[2].Value
+                            if ($suffixLength -le 0) { $validRange = $false }
+                            else { $start = [Math]::Max(0, $totalLength - $suffixLength) }
+                        } else {
+                            $start = [long]$rangeMatch.Groups[1].Value
+                            if ($rangeMatch.Groups[2].Value) { $end = [long]$rangeMatch.Groups[2].Value }
+                        }
+                        if ($start -ge $totalLength -or $end -lt $start) {
+                            $validRange = $false
+                        }
+                        if (-not $validRange) {
+                            $response.StatusCode = 416
+                            $response.Headers.Add('Content-Range', "bytes */$totalLength")
+                            $response.ContentLength64 = 0
+                        } else {
+                            $end = [Math]::Min($end, $totalLength - 1)
+                            $response.StatusCode = 206
+                            $response.Headers.Add('Content-Range', "bytes $start-$end/$totalLength")
+                        }
+                    }
+                    $response.Headers.Add('Accept-Ranges', 'bytes')
+                    if ($validRange) {
+                        $response.ContentLength64 = $end - $start + 1
+                        $fileStream.Position = $start
+                        $buffer = New-Object byte[] 65536
+                        $remaining = $response.ContentLength64
+                        while ($remaining -gt 0) {
+                            $readLength = [int][Math]::Min($buffer.Length, $remaining)
+                            $read = $fileStream.Read($buffer, 0, $readLength)
+                            if ($read -le 0) { break }
+                            $response.OutputStream.Write($buffer, 0, $read)
+                            $remaining -= $read
+                        }
+                    }
+                } finally {
+                    $fileStream.Dispose()
+                    $response.Close()
+                }
+            } catch {
+                Write-Host "Could not preview '$filePath': $($_.Exception.Message)" -ForegroundColor Yellow
+                if ($response.OutputStream.CanWrite) {
+                    Write-JsonResponse -Response $response -Value @{ error = $_.Exception.Message } -StatusCode 400
+                }
+            }
+        }
+        else {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($html)
+            $response.ContentType = 'text/html; charset=utf-8'
+            $response.Headers.Add('X-Content-Type-Options', 'nosniff')
+            $response.Headers.Add('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self' about:; connect-src 'self'; object-src 'none'; base-uri 'none'")
+            $response.ContentLength64 = $bytes.Length
+            $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            $response.Close()
+        }
+        $pending = $listener.BeginGetContext($null, $null)
+    }
+    $listener.Stop()
+    $listener.Close()
+}
+catch {
+    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace
+    Write-Host ""
+    Read-Host "Press Enter to close"
+}
