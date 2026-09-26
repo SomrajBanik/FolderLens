@@ -32,7 +32,7 @@ Running `project.ps1` without a folder argument opens the Windows folder chooser
 
 ## Using the page
 
-- Browse the folder cards or open **Folder tree** to navigate the hierarchy. Drag the divider to resize the tree; use its x button to close it.
+- Browse the folder cards or open **Folder tree** to navigate the hierarchy. Drag the divider to resize the tree; use its `x` button to close it.
 - Choose **Preview** for supported file types. Other types get a clear explanation and can be opened with a registered app.
 - Choose **Open with...** to select an app registered with Windows for that file type, or use the Windows default.
 - Add files with the folder's add card, using the file picker or drag and drop.
