@@ -667,34 +667,61 @@ public static class FolderLensPathResolver
   :root[data-theme="light"] .sort-control select, :root[data-theme="light"] .header-button { border-color: rgba(104,140,174,.3); background: rgba(255,255,255,.65); }
   #workspace { display: flex; align-items: stretch; gap: 0; max-width: 1600px; min-height: calc(100vh - 124px); margin: auto; }
   #main-content { flex: 1 1 auto; min-width: 0; padding: 0 16px 24px 0; }
-  #tree-pane { position: sticky; top: 12px; flex: 0 0 auto; width: 45vw; height: calc(100vh - 124px); min-width: 240px; max-width: 55vw; align-self: flex-start; overflow: hidden; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; background: rgba(31,34,39,.88); box-shadow: 0 18px 48px rgba(0,0,0,.2); animation: pane-in .16s ease-out; }
+  #tree-pane { position: sticky; top: 12px; display: flex; flex: 0 0 auto; flex-direction: column; width: min(360px, 38vw); height: calc(100vh - 124px); min-width: 240px; max-width: 55vw; align-self: flex-start; overflow: hidden; border: 1px solid rgba(255,255,255,.14); border-radius: 16px; background: rgba(31,34,39,.92); box-shadow: 0 18px 48px rgba(0,0,0,.24); animation: pane-in .16s ease-out; }
   :root[data-theme="light"] #tree-pane { border-color: rgba(104,140,174,.25); background: rgba(248,251,254,.94); box-shadow: 0 18px 48px rgba(74,105,139,.12); }
   @keyframes pane-in { from { opacity: .5; transform: translateX(8px); } to { opacity: 1; transform: translateX(0); } }
-  #tree-resizer { flex: 0 0 9px; position: relative; cursor: col-resize; touch-action: none; }
-  #tree-resizer::after { content: ''; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px; border-radius: 2px; background: transparent; transition: background .15s; }
+  #tree-resizer { flex: 0 0 12px; position: relative; cursor: col-resize; touch-action: none; }
+  #tree-resizer::after { content: ''; position: absolute; top: 12px; bottom: 12px; left: 5px; width: 3px; border-radius: 3px; background: transparent; transition: background .15s, box-shadow .15s; }
   #tree-resizer:hover::after, #tree-resizer.dragging::after { background: #88b9e4; }
-  .tree-header { display: flex; align-items: center; justify-content: space-between; min-height: 49px; padding: 0 11px 0 16px; border-bottom: 1px solid rgba(255,255,255,.1); }
+  #tree-resizer:focus-visible { outline: none; }
+  #tree-resizer:focus-visible::after { background: #88b9e4; box-shadow: 0 0 0 3px rgba(112,162,207,.2); }
+  .tree-header { display: flex; align-items: center; justify-content: space-between; min-height: 59px; padding: 0 12px 0 16px; border-bottom: 1px solid rgba(255,255,255,.1); }
   :root[data-theme="light"] .tree-header { border-bottom-color: rgba(104,140,174,.2); }
-  .tree-heading { font-size: 10px; font-weight: 750; letter-spacing: 1.1px; opacity: .78; text-transform: uppercase; }
+  .tree-heading-wrap { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .tree-heading { font-size: 12px; font-weight: 700; letter-spacing: .2px; }
+  .tree-root-name { max-width: 260px; overflow: hidden; color: #9da9b5; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  :root[data-theme="light"] .tree-root-name { color: #637b90; }
+  .tree-header-actions { display: flex; align-items: center; gap: 4px; }
   .icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; border: 1px solid transparent; border-radius: 8px; color: inherit; background: transparent; font: inherit; font-size: 19px; line-height: 1; cursor: pointer; }
   .icon-button:hover { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.09); }
-  #tree-content { height: calc(100% - 50px); overflow: auto; padding: 9px 8px 16px; }
+  .tree-toolbar { display: grid; gap: 9px; padding: 12px; border-bottom: 1px solid rgba(255,255,255,.08); }
+  :root[data-theme="light"] .tree-toolbar { border-bottom-color: rgba(104,140,174,.16); }
+  .tree-search-wrap { position: relative; }
+  .tree-search-icon { position: absolute; top: 50%; left: 11px; width: 15px; height: 15px; color: #9aa8b7; pointer-events: none; transform: translateY(-50%); }
+  .tree-search { width: 100%; height: 36px; padding: 0 11px 0 34px; border: 1px solid rgba(255,255,255,.13); border-radius: 9px; outline: none; color: inherit; background: rgba(0,0,0,.15); font: inherit; font-size: 11px; }
+  .tree-search:focus { border-color: #78a9d4; box-shadow: 0 0 0 3px rgba(112,162,207,.16); }
+  .tree-search::placeholder { color: #929eaa; }
+  :root[data-theme="light"] .tree-search { border-color: rgba(104,140,174,.25); background: rgba(255,255,255,.75); }
+  .tree-toolbar-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .tree-count-summary { color: #929eaa; font-size: 10px; }
+  :root[data-theme="light"] .tree-count-summary { color: #637b90; }
+  .tree-action-group { display: flex; gap: 5px; }
+  .tree-action { padding: 4px 7px; border: 1px solid transparent; border-radius: 6px; color: #b7c1cb; background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+  .tree-action:hover { border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.07); color: inherit; }
+  :root[data-theme="light"] .tree-action { color: #526c82; }
+  :root[data-theme="light"] .tree-action:hover { border-color: rgba(104,140,174,.22); background: rgba(94,157,210,.08); }
+  #tree-content { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 9px 8px 16px; scrollbar-color: rgba(145,165,183,.35) transparent; scrollbar-width: thin; }
+  #tree-empty { padding: 22px 14px; color: #9da9b5; font-size: 11px; text-align: center; }
+  #tree-empty[hidden] { display: none; }
   .tree-list { list-style: none; margin: 0; padding: 0; }
-  .tree-children { list-style: none; margin: 1px 0 2px 13px; padding: 0 0 0 8px; border-left: 1px solid rgba(255,255,255,.1); }
+  .tree-children { list-style: none; margin: 2px 0 3px 12px; padding: 0 0 0 9px; border-left: 1px solid rgba(255,255,255,.1); }
   :root[data-theme="light"] .tree-children { border-left-color: rgba(104,140,174,.22); }
-  .tree-row { display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%; padding: 6px 7px; border: 0; border-radius: 7px; color: inherit; background: transparent; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
+  .tree-row { display: flex; align-items: center; gap: 7px; min-width: 0; width: 100%; min-height: 30px; padding: 4px 7px; border: 0; border-radius: 7px; color: inherit; background: transparent; text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
   summary.tree-row { list-style: none; }
   summary.tree-row::-webkit-details-marker { display: none; }
   details[open] > summary .tree-caret { transform: rotate(90deg); }
-  .tree-caret { transition: transform .12s ease; }
-  .tree-row:hover { background: rgba(255,255,255,.08); }
-  .tree-row.active { background: rgba(112,162,207,.18); color: #b9dcfb; }
+  .tree-row:hover { background: rgba(255,255,255,.065); }
+  .tree-row:focus-visible, .icon-button:focus-visible, .tree-action:focus-visible { outline: 2px solid #78a9d4; outline-offset: 1px; }
+  .tree-row.active { background: rgba(112,162,207,.2); color: #d5e9fb; box-shadow: inset 2px 0 #78a9d4; }
   :root[data-theme="light"] .tree-row.active { color: #245982; background: rgba(94,157,210,.15); }
-  .tree-caret { flex: 0 0 13px; color: #91a5b7; font-size: 10px; text-align: center; }
-  .tree-folder-icon { flex: 0 0 15px; color: #e6bd78; }
-  .tree-file-icon { flex: 0 0 15px; color: #a6b8ca; font-size: 13px; text-align: center; }
+  .tree-caret { display: inline-grid; flex: 0 0 13px; place-items: center; color: #91a5b7; font-size: 11px; transition: transform .12s ease; }
+  .tree-folder-icon, .tree-file-icon { display: inline-grid; flex: 0 0 16px; place-items: center; }
+  .tree-folder-icon svg, .tree-file-icon svg { width: 15px; height: 15px; display: block; }
+  .tree-folder-icon { color: #e3b95f; }
+  .tree-file-icon { color: #9aaabd; }
   .tree-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tree-count { margin-left: auto; color: #8f9aa7; font-size: 10px; }
+  .tree-count { margin-left: auto; padding: 1px 6px; border-radius: 10px; color: #9ca8b4; background: rgba(255,255,255,.06); font-size: 9px; font-variant-numeric: tabular-nums; }
+  :root[data-theme="light"] .tree-count { color: #58748d; background: rgba(80,127,164,.08); }
   #workspace.tree-hidden #tree-pane, #workspace.tree-hidden #tree-resizer { display: none; }
   #workspace.tree-hidden #main-content { padding-right: 0; }
   .tree-toggle { display: inline-flex; align-items: center; gap: 7px; }
@@ -799,7 +826,7 @@ public static class FolderLensPathResolver
   .preview-buttons { display: flex; grid-column: 2; align-items: center; justify-content: center; gap: 8px; }
   .preview-actions button { min-width: 106px; }
   @media (max-width: 900px) {
-    #tree-pane { width: 42vw; min-width: 190px; }
+    #tree-pane { width: 38vw; min-width: 190px; }
   }
   @media (max-width: 700px) {
     body { padding: 10px 12px 24px; }
@@ -839,7 +866,17 @@ public static class FolderLensPathResolver
 <div id="workspace" class="tree-hidden">
   <main id="main-content"><div id="app"></div></main>
   <div id="tree-resizer" role="separator" aria-label="Resize folder tree" aria-orientation="vertical" tabindex="0" hidden></div>
-  <aside id="tree-pane" aria-label="Folder tree" hidden><div class="tree-header"><span class="tree-heading">Explorer</span><button id="close-tree" class="icon-button" type="button" aria-label="Close folder tree" title="Close folder tree">&times;</button></div><div id="tree-content"></div></aside>
+  <aside id="tree-pane" aria-label="Folder tree" hidden>
+    <div class="tree-header">
+      <div class="tree-heading-wrap"><span class="tree-heading">Folder explorer</span><span id="tree-root-name" class="tree-root-name"></span></div>
+      <div class="tree-header-actions"><button id="close-tree" class="icon-button" type="button" aria-label="Close folder tree" title="Close folder tree">&times;</button></div>
+    </div>
+    <div class="tree-toolbar">
+      <label class="tree-search-wrap"><svg class="tree-search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.8" cy="8.8" r="5.8" stroke="currentColor" stroke-width="1.6"/><path d="m13.2 13.2 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><input id="tree-search" class="tree-search" type="search" placeholder="Search folders and files" aria-label="Search folders and files"></label>
+      <div class="tree-toolbar-actions"><span id="tree-count-summary" class="tree-count-summary"></span><div class="tree-action-group"><button id="tree-expand-all" class="tree-action" type="button">Expand all</button><button id="tree-collapse-all" class="tree-action" type="button">Collapse all</button></div></div>
+    </div>
+    <div id="tree-content"></div><div id="tree-empty" hidden>No matching folders or files.</div>
+  </aside>
 </div>
 <div id="toast" role="status"></div>
 <dialog id="open-dialog">
@@ -865,6 +902,8 @@ const treePane = document.getElementById('tree-pane');
 const treeResizer = document.getElementById('tree-resizer');
 const treeContent = document.getElementById('tree-content');
 const treeToggle = document.getElementById('toggle-tree');
+const treeSearch = document.getElementById('tree-search');
+const treeEmpty = document.getElementById('tree-empty');
 const sortBy = document.getElementById('sort-by');
 const sortOrder = document.getElementById('sort-order');
 const refreshButton = document.getElementById('refresh-library');
@@ -877,6 +916,7 @@ let activePreviewFile = null;
 let selectedAppId = 'default';
 let refreshing = false;
 let treeResizeActive = false;
+const expandedTreePaths = new Set([initialCatalog.root.toLowerCase()]);
 const folderSectionIds = new Map();
 const fileDomIds = new Map();
 document.getElementById('root-label').textContent = initialCatalog.root;
@@ -926,6 +966,7 @@ function sortFiles(files) {
 
 function renderFolderTree() {
   const rootPath = initialCatalog.root.replace(/[\\/]+$/, '');
+  document.getElementById('tree-root-name').textContent = initialCatalog.root;
   const rootNode = { name: rootPath.split(/[\\/]/).pop() || rootPath, path: initialCatalog.root, children: new Map(), sectionName: null, files: [] };
   for (const [sectionName, targetPath] of Object.entries(sectionTargets)) {
     const target = String(targetPath);
@@ -949,7 +990,12 @@ function renderFolderTree() {
   function makeTreeBranch(node, isRoot) {
     const item = document.createElement('li');
     const details = document.createElement('details');
-    details.open = isRoot;
+    details.dataset.path = node.path.toLowerCase();
+    details.open = isRoot || expandedTreePaths.has(node.path.toLowerCase());
+    details.addEventListener('toggle', () => {
+      if (details.open) expandedTreePaths.add(details.dataset.path);
+      else expandedTreePaths.delete(details.dataset.path);
+    });
     const summary = document.createElement('summary');
     summary.className = 'tree-row';
     summary.title = node.path;
@@ -958,7 +1004,7 @@ function renderFolderTree() {
     caret.textContent = node.children.size ? '\u25B8' : '';
     const folderIcon = document.createElement('span');
     folderIcon.className = 'tree-folder-icon';
-    folderIcon.textContent = '\uD83D\uDCC1';
+    folderIcon.innerHTML = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M2.5 5.2a1.7 1.7 0 0 1 1.7-1.7h4l1.7 1.8h5.9a1.7 1.7 0 0 1 1.7 1.7v7.7a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7V5.2Z" fill="currentColor" fill-opacity=".18" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.8 7.4h14.4" stroke="currentColor" stroke-width="1.2"/></svg>';
     const label = document.createElement('span');
     label.className = 'tree-label';
     label.textContent = node.name;
@@ -995,7 +1041,7 @@ function renderFolderTree() {
         fileRow.title = file.path;
         const fileIcon = document.createElement('span');
         fileIcon.className = 'tree-file-icon';
-        fileIcon.textContent = '\uD83D\uDCC4';
+        fileIcon.innerHTML = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.8h6.4l3.8 3.8v10.6H5V2.8Z" fill="currentColor" fill-opacity=".12" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M11.2 3v4h4M7.5 10h5.2M7.5 12.7h5.2" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/></svg>';
         const fileLabel = document.createElement('span');
         fileLabel.className = 'tree-label';
         fileLabel.textContent = file.name;
@@ -1019,6 +1065,27 @@ function renderFolderTree() {
   list.className = 'tree-list';
   list.appendChild(makeTreeBranch(rootNode, true));
   treeContent.replaceChildren(list);
+  const folderCount = treeContent.querySelectorAll('details').length;
+  const fileCount = treeContent.querySelectorAll('.file-tree-row').length;
+  document.getElementById('tree-count-summary').textContent = folderCount + ' folders · ' + fileCount + ' files';
+  applyTreeSearch();
+}
+
+function applyTreeSearch() {
+  const query = treeSearch.value.trim().toLocaleLowerCase();
+  const items = [...treeContent.querySelectorAll('li')];
+  for (const item of items.reverse()) {
+    const row = item.querySelector(':scope > details > .tree-row, :scope > .tree-row');
+    const ownMatch = !query || row.textContent.toLocaleLowerCase().includes(query);
+    const descendantMatch = Boolean(item.querySelector('li:not([hidden])'));
+    item.hidden = !ownMatch && !descendantMatch;
+    if (query && descendantMatch) {
+      const details = item.querySelector(':scope > details');
+      if (details) details.open = true;
+    }
+  }
+  const hasResults = Boolean(treeContent.querySelector('li:not([hidden])'));
+  treeEmpty.hidden = !query || hasResults;
 }
 
 function renderCatalog(nextData, nextTargets) {
@@ -1400,15 +1467,37 @@ function setTreeOpen(open) {
   if (open) {
     try {
       const savedWidth = Number(localStorage.getItem('fileLibraryTreeWidth'));
-      const width = Number.isFinite(savedWidth) && savedWidth >= 190
+      const width = Number.isFinite(savedWidth) && savedWidth > 0
         ? savedWidth
-        : Math.round(Math.min(window.innerWidth * .45, window.innerWidth * .55));
-      treePane.style.width = Math.max(240, Math.min(width, window.innerWidth * .55)) + 'px';
+        : Math.min(360, window.innerWidth * .38);
+      treePane.style.width = clampTreeWidth(width) + 'px';
     } catch (error) { console.warn('Could not read folder tree width:', error); }
   }
 }
 treeToggle.addEventListener('click', () => setTreeOpen(workspace.classList.contains('tree-hidden')));
 document.getElementById('close-tree').addEventListener('click', () => setTreeOpen(false));
+treeSearch.addEventListener('input', applyTreeSearch);
+document.getElementById('tree-expand-all').addEventListener('click', () => {
+  treeContent.querySelectorAll('details').forEach(details => {
+    details.open = true;
+    expandedTreePaths.add(details.dataset.path);
+  });
+});
+document.getElementById('tree-collapse-all').addEventListener('click', () => {
+  treeContent.querySelectorAll('details').forEach(details => {
+    if (details.dataset.path === initialCatalog.root.toLowerCase()) {
+      details.open = true;
+      return;
+    }
+    details.open = false;
+    expandedTreePaths.delete(details.dataset.path);
+  });
+});
+function clampTreeWidth(width) {
+  const minimum = window.innerWidth <= 900 ? 190 : 240;
+  const maximum = Math.max(minimum, Math.min(window.innerWidth * .55, workspace.clientWidth - 280));
+  return Math.max(minimum, Math.min(width, maximum));
+}
 treeResizer.addEventListener('pointerdown', event => {
   treeResizeActive = true;
   treeResizer.classList.add('dragging');
@@ -1418,7 +1507,7 @@ treeResizer.addEventListener('pointerdown', event => {
 treeResizer.addEventListener('pointermove', event => {
   if (!treeResizeActive) return;
   const bounds = workspace.getBoundingClientRect();
-  const width = Math.max(190, Math.min(window.innerWidth * .55, bounds.right - event.clientX));
+  const width = clampTreeWidth(bounds.right - event.clientX - treeResizer.offsetWidth / 2);
   treePane.style.width = width + 'px';
 });
 function finishTreeResize(event) {
@@ -1435,9 +1524,14 @@ treeResizer.addEventListener('keydown', event => {
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
   event.preventDefault();
   const change = event.key === 'ArrowLeft' ? 24 : -24;
-  treePane.style.width = Math.max(190, Math.min(window.innerWidth * .55, treePane.getBoundingClientRect().width + change)) + 'px';
+  treePane.style.width = clampTreeWidth(treePane.getBoundingClientRect().width + change) + 'px';
   try { localStorage.setItem('fileLibraryTreeWidth', String(Math.round(treePane.getBoundingClientRect().width))); }
   catch (error) { console.warn('Could not save folder tree width:', error); }
+});
+window.addEventListener('resize', () => {
+  if (!treePane.hidden && window.innerWidth > 700) {
+    treePane.style.width = clampTreeWidth(treePane.getBoundingClientRect().width) + 'px';
+  }
 });
 
 async function refreshLibrary() {
