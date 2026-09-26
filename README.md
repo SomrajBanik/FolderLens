@@ -29,7 +29,7 @@ You can also start it directly from PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\FolderLens.ps1 "C:\Path\To\Folder"
 ```
 
-Running `FolderLens.ps1` without a folder argument opens the Windows folder chooser, initially at the script's own folder.
+Running `FolderLens.ps1` without a folder argument opens Windows' modern Explorer-style folder picker, initially at the script's own folder. The picker can be resized and includes the usual navigation locations and folder listing.
 
 ## Using the page
 
