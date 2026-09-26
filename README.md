@@ -6,6 +6,7 @@ FolderLens is a small Windows folder browser that turns a chosen directory into 
 
 - **Lightweight:** a PowerShell script, a batch launcher, and one small SVG icon. It uses Windows PowerShell, the built-in .NET HTTP listener, and your existing browser; there are no package installs, databases, background services, or third-party runtimes.
 - **Your files stay local:** the page and file previews are served from a local web server on your PC. FolderLens does not upload your collection to a cloud service. Files are written to the selected folder only when you explicitly add them through the page.
+- **Folder boundary checks:** file and upload paths are resolved against their actual Windows filesystem targets. Links that point outside the selected folder are not exposed or used as upload destinations.
 - **Works with mixed folders:** it catalogs files recursively, keeps the folder hierarchy visible, and lets you sort by name, modified date, or size.
 - **Uses apps you actually have:** "Open with..." lists Windows-registered apps for the selected file type, along with the Windows default app.
 - **Easy to use:** includes browser previews for common images, PDFs, text, audio, and video, a resizable folder tree, drag-and-drop file adding, and a light/dark appearance switch.
@@ -13,11 +14,11 @@ FolderLens is a small Windows folder browser that turns a chosen directory into 
 ## Run it
 
 1. Download or clone this repository to a Windows PC.
-2. Double-click `project.bat` to choose a folder and open its catalog.
+2. Double-click `FolderLens.bat` to choose a folder and open its catalog.
 3. Or pass the folder path directly:
 
    ```powershell
-   .\project.bat "C:\Users\YourName\Documents"
+   .\FolderLens.bat "C:\Users\YourName\Documents"
    ```
 
 The script uses Windows PowerShell and opens the page in Microsoft Edge's app-style window when Edge is found. Otherwise, it opens your default browser. Close the page to stop the local server.
@@ -25,10 +26,10 @@ The script uses Windows PowerShell and opens the page in Microsoft Edge's app-st
 You can also start it directly from PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\project.ps1 "C:\Path\To\Folder"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\FolderLens.ps1 "C:\Path\To\Folder"
 ```
 
-Running `project.ps1` without a folder argument opens the Windows folder chooser, initially at the script's own folder.
+Running `FolderLens.ps1` without a folder argument opens the Windows folder chooser, initially at the script's own folder.
 
 ## Using the page
 
@@ -43,5 +44,5 @@ Running `project.ps1` without a folder argument opens the Windows folder chooser
 
 - Windows with Windows PowerShell 5.1 or later.
 - A modern browser; Microsoft Edge is preferred when installed.
-- FolderLens binds its local HTTP server to `http://localhost:8765/`. If that port is already in use, close the other local service or change `$port` near the top of `project.ps1`.
+- FolderLens binds its local HTTP server to `http://localhost:8765/`. If that port is already in use, close the other local service or change `$port` near the top of `FolderLens.ps1`.
 - Browser previews depend on the browser supporting the file's media format. **Open with...** remains available for files that cannot be previewed.
