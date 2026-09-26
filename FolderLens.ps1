@@ -68,10 +68,17 @@ public static class FolderLensFolderPicker
     private const uint PathMustExist = 0x00000800;
     private const int Cancelled = unchecked((int)0x800704C7);
     private const uint FileSystemPath = 0x80058000;
+    private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
     private static extern int SHCreateItemFromParsingName(
         string path, IntPtr bindContext, ref Guid interfaceId, out IFolderLensShellItem item);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
 
     public static string Choose(string initialFolder)
     {
@@ -79,6 +86,15 @@ public static class FolderLensFolderPicker
         IFolderLensShellItem initialItem = null;
         IFolderLensShellItem selectedItem = null;
         IntPtr displayName = IntPtr.Zero;
+        IntPtr previousDpiContext = IntPtr.Zero;
+        try
+        {
+            previousDpiContext = SetThreadDpiAwarenessContext(PerMonitorAwareV2);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            SetProcessDPIAware();
+        }
         try
         {
             Type dialogType = Type.GetTypeFromCLSID(new Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7"), true);
@@ -122,6 +138,7 @@ public static class FolderLensFolderPicker
             if (selectedItem != null && Marshal.IsComObject(selectedItem)) Marshal.ReleaseComObject(selectedItem);
             if (initialItem != null && Marshal.IsComObject(initialItem)) Marshal.ReleaseComObject(initialItem);
             if (instance != null && Marshal.IsComObject(instance)) Marshal.ReleaseComObject(instance);
+            if (previousDpiContext != IntPtr.Zero) SetThreadDpiAwarenessContext(previousDpiContext);
         }
     }
 }
