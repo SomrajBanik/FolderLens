@@ -265,6 +265,35 @@ public static class FolderLensPathResolver
         }
     }
 
+    function Get-ApplicationFileArguments {
+        param(
+            [Parameter(Mandatory=$true)][string]$CommandArguments,
+            [Parameter(Mandatory=$true)][string]$FilePath
+        )
+
+        $fileArgument = $FilePath
+        if ($CommandArguments -match '(?i)(?:^|\s)--single-argument(?:\s|$)') {
+            $fileArgument = ([Uri]$FilePath).AbsoluteUri
+        }
+        $quotedFileArgument = '"' + $fileArgument + '"'
+
+        if ($CommandArguments -match '"%[1lL]"') {
+            return [regex]::Replace(
+                $CommandArguments,
+                '"%[1lL]"',
+                [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $quotedFileArgument }
+            )
+        }
+        if ($CommandArguments -match '%[1lL]') {
+            return [regex]::Replace(
+                $CommandArguments,
+                '%[1lL]',
+                [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $quotedFileArgument }
+            )
+        }
+        return ($CommandArguments + ' ' + $quotedFileArgument).Trim()
+    }
+
     $script:appCatalogById = @{}
     function Get-InstalledAppsForExtension {
         param([Parameter(Mandatory=$true)][string]$Extension)
@@ -1427,15 +1456,7 @@ window.addEventListener('pagehide', () => navigator.sendBeacon('/page-close', ''
                         -not (Test-Path -LiteralPath $selectedApp.Executable -PathType Leaf)) {
                         throw "That app is no longer available. Reopen the app list and try again."
                     }
-                    $arguments = $selectedApp.Arguments
-                    $quotedFilePath = '"' + $filePath + '"'
-                    if ($arguments -match '"%[1lL]"') {
-                        $arguments = [regex]::Replace($arguments, '"%[1lL]"', [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $quotedFilePath })
-                    } elseif ($arguments -match '%[1lL]') {
-                        $arguments = [regex]::Replace($arguments, '%[1lL]', [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $quotedFilePath })
-                    } else {
-                        $arguments = ($arguments + ' ' + $quotedFilePath).Trim()
-                    }
+                    $arguments = Get-ApplicationFileArguments -CommandArguments $selectedApp.Arguments -FilePath $filePath
                     Start-Process -FilePath $selectedApp.Executable -ArgumentList $arguments -ErrorAction Stop
                 }
                 Write-JsonResponse -Response $response -Value @{ ok = $true }
