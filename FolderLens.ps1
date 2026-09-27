@@ -790,21 +790,18 @@ public static class FolderLensPathResolver
   .series h2 { font-size: 15px; color: #d2d5dc; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid rgba(232,235,240,.16); padding-bottom: 10px; margin-bottom: 16px; overflow-wrap: anywhere; }
   :root[data-theme="light"] .series h2 { color: #42688d; border-bottom-color: rgba(75,112,147,.2); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px; }
-  .card { min-width: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(238,241,246,.19); border-radius: 15px; background: linear-gradient(155deg, rgba(255,255,255,.12), rgba(255,255,255,.045) 48%, rgba(190,197,208,.07)); box-shadow: 0 14px 34px rgba(7,5,16,.22); backdrop-filter: blur(14px); transition: transform .2s, border-color .2s; }
+  .card { position: relative; min-width: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(238,241,246,.19); border-radius: 15px; background: linear-gradient(155deg, rgba(255,255,255,.12), rgba(255,255,255,.045) 48%, rgba(190,197,208,.07)); box-shadow: 0 14px 34px rgba(7,5,16,.22); backdrop-filter: blur(14px); transition: transform .2s, border-color .2s; }
   .card:hover { transform: translateY(-3px); border-color: rgba(232,236,243,.5); }
-  .card.tree-file-highlight { animation: tree-file-highlight 1.25s ease-out; }
+  .card.tree-file-highlight { border-color: #ffd166; outline: 2px solid rgba(255,209,102,.72); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(255,209,102,.16), 0 0 30px rgba(255,196,87,.28); }
+  .card.tree-file-highlight::after { content: ''; position: absolute; z-index: 2; inset: 0; border: 2px solid rgba(255,209,102,.86); border-radius: inherit; background: rgba(255,196,87,.3); box-shadow: inset 0 0 34px rgba(255,196,87,.28), 0 0 26px rgba(255,196,87,.32); opacity: 0; pointer-events: none; animation: tree-file-highlight 6s ease-in-out both; }
   @keyframes tree-file-highlight {
-    0% { border-color: #8ccaff; box-shadow: 0 0 0 0 rgba(112,182,239,.55), 0 0 28px rgba(112,182,239,.42); }
-    45% { border-color: #8ccaff; box-shadow: 0 0 0 4px rgba(112,182,239,.22), 0 0 24px rgba(112,182,239,.28); }
-    100% { border-color: rgba(238,241,246,.19); box-shadow: 0 14px 34px rgba(7,5,16,.22); }
+    0%, 8% { opacity: 0; }
+    22%, 58% { opacity: 1; }
+    100% { opacity: 0; }
   }
-  :root[data-theme="light"] .card.tree-file-highlight { animation-name: tree-file-highlight-light; }
-  @keyframes tree-file-highlight-light {
-    0% { border-color: #3488c7; box-shadow: 0 0 0 0 rgba(52,136,199,.42), 0 0 26px rgba(52,136,199,.32); }
-    45% { border-color: #3488c7; box-shadow: 0 0 0 4px rgba(52,136,199,.18), 0 0 22px rgba(52,136,199,.2); }
-    100% { border-color: rgba(255,255,255,.88); box-shadow: 0 14px 34px rgba(74,105,139,.12); }
-  }
-  @media (prefers-reduced-motion: reduce) { .card.tree-file-highlight { animation-duration: .01ms; } }
+  :root[data-theme="light"] .card.tree-file-highlight { border-color: #3488c7; outline-color: rgba(52,136,199,.68); box-shadow: 0 0 0 4px rgba(52,136,199,.12), 0 0 28px rgba(52,136,199,.22); }
+  :root[data-theme="light"] .card.tree-file-highlight::after { border-color: rgba(52,136,199,.9); background: rgba(52,136,199,.2); box-shadow: inset 0 0 32px rgba(52,136,199,.2), 0 0 24px rgba(52,136,199,.26); }
+  @media (prefers-reduced-motion: reduce) { .card.tree-file-highlight::after { animation-duration: .01ms; } }
   :root[data-theme="light"] .card { background: linear-gradient(155deg, rgba(255,255,255,.85), rgba(255,255,255,.48) 48%, rgba(207,230,249,.42)); border-color: rgba(255,255,255,.88); box-shadow: 0 14px 34px rgba(74,105,139,.12); }
   .thumb { width: 100%; height: 142px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(160deg,#383c43,#22252a); }
   :root[data-theme="light"] .thumb { background: linear-gradient(160deg,#e5f1fb,#cbdff0); }
@@ -996,7 +993,6 @@ let selectedAppId = 'default';
 let refreshing = false;
 let treeResizeActive = false;
 let selectedTreeFilePath = null;
-let highlightTimer = null;
 const expandedTreePaths = new Set([initialCatalog.root.toLowerCase()]);
 const folderSectionIds = new Map();
 const fileDomIds = new Map();
@@ -1124,6 +1120,9 @@ function getSortedFolderSections(rootNode) {
 }
 
 function highlightTreeFile(filePath) {
+  const previousCardId = selectedTreeFilePath && fileDomIds.get(selectedTreeFilePath.toLowerCase());
+  const previousCard = previousCardId && document.getElementById(previousCardId);
+  if (previousCard) previousCard.classList.remove('tree-file-highlight');
   selectedTreeFilePath = filePath;
   const cardId = fileDomIds.get(filePath.toLowerCase());
   const card = cardId && document.getElementById(cardId);
@@ -1132,8 +1131,6 @@ function highlightTreeFile(filePath) {
   card.classList.remove('tree-file-highlight');
   void card.offsetWidth;
   card.classList.add('tree-file-highlight');
-  clearTimeout(highlightTimer);
-  highlightTimer = setTimeout(() => card.classList.remove('tree-file-highlight'), 1350);
 }
 
 function renderFolderTree(rootNode) {
@@ -1363,14 +1360,6 @@ function renderCatalog(nextData, nextTargets) {
     app.appendChild(section);
   }
   renderFolderTree(folderRoot);
-  if (selectedTreeFilePath) {
-    const selectedCardId = fileDomIds.get(selectedTreeFilePath.toLowerCase());
-    const selectedCard = selectedCardId && document.getElementById(selectedCardId);
-    if (selectedCard) {
-      clearTimeout(highlightTimer);
-      highlightTimer = setTimeout(() => selectedCard.classList.remove('tree-file-highlight'), 1350);
-    }
-  }
 }
 
 async function uploadFiles(fileList, targetFolder) {
