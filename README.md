@@ -7,7 +7,7 @@ FolderLens is a small Windows folder browser that turns a chosen directory into 
 - **Lightweight:** a PowerShell script, a batch launcher, and one small SVG icon. It uses Windows PowerShell, the built-in .NET HTTP listener, and your existing browser; there are no package installs, databases, background services, or third-party runtimes.
 - **Your files stay local:** the page and file previews are served from a local web server on your PC. FolderLens does not upload your collection to a cloud service. Files are written to the selected folder only when you explicitly add them through the page.
 - **Folder boundary checks:** file and upload paths are resolved against their actual Windows filesystem targets. Links that point outside the selected folder are not exposed or used as upload destinations.
-- **Works with mixed folders:** it catalogs files recursively, keeps the folder hierarchy visible, and lets you sort by name, modified date, or size.
+- **Works with mixed folders:** it catalogs files recursively, shows full folder paths with nested folders indented, and sorts both folders and files by name, modified date, or size.
 - **Uses apps you actually have:** "Open with..." lists Windows-registered apps for the selected file type, along with the Windows default app.
 - **Easy to use:** includes browser previews for common images, PDFs, text, audio, and video, a resizable folder tree, drag-and-drop file adding, and a light/dark appearance switch.
 
@@ -21,7 +21,7 @@ FolderLens is a small Windows folder browser that turns a chosen directory into 
    .\FolderLens.bat "C:\Users\YourName\Documents"
    ```
 
-The script uses Windows PowerShell and opens the page in Microsoft Edge's app-style window when Edge is found. Otherwise, it opens your default browser. Close the page to stop the local server.
+The script uses Windows PowerShell and opens the page in Microsoft Edge's app-style window when Edge is found. Otherwise, it opens your default browser. Initial folder scanning runs after the page opens and shows progress in the terminal; keep the terminal open while using FolderLens. The server stops after you close the browser page.
 
 You can also start it directly from PowerShell:
 
@@ -34,6 +34,7 @@ Running `FolderLens.ps1` without a folder argument opens Windows' modern Explore
 ## Using the page
 
 - Browse the folder cards or open **Folder tree** to navigate the hierarchy. Search folders and files, expand or collapse the tree, and drag the divider to resize it; use its `x` button to close it.
+- Selecting a file in the folder tree scrolls to its card and briefly highlights it. Folder sorting follows the selected sort field, with folders grouped under their parent paths.
 - Choose **Preview** for supported file types. Other types get a clear explanation and can be opened with a registered app.
 - Choose **Open with...** to select an app registered with Windows for that file type, or use the Windows default.
 - Add files with the folder's add card, using the file picker or drag and drop.

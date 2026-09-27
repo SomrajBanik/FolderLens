@@ -299,56 +299,99 @@ public static class FolderLensPathResolver
         return $relativePath -match '(^|[\\/])\.git([\\/]|$)'
     }
 
-    function Get-RelativeFolderName {
-        param([Parameter(Mandatory=$true)][string]$Path)
-        $directoryPath = if (Test-Path -LiteralPath $Path -PathType Container) { $Path } else { [IO.Path]::GetDirectoryName($Path) }
-        if ($directoryPath.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
-            return "This folder"
+    function Test-ScannedEntryWithinRoot {
+        param([Parameter(Mandatory=$true)][IO.FileSystemInfo]$Entry)
+        $fullPath = [IO.Path]::GetFullPath($Entry.FullName)
+        $insideRoot = if (
+            $root.EndsWith([IO.Path]::DirectorySeparatorChar.ToString()) -or
+            $root.EndsWith([IO.Path]::AltDirectorySeparatorChar.ToString())
+        ) {
+            $fullPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+        } else {
+            $fullPath.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $fullPath.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+            $fullPath.StartsWith($root + [IO.Path]::AltDirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
         }
-        return "Subfolder: " + $directoryPath.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace('\', ' / ')
+        if (-not $insideRoot) {
+            return $false
+        }
+        if (($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return Test-PathWithinRoot -Path $fullPath
+        }
+        return $true
     }
 
     function Get-LibraryCatalog {
         $sections = [ordered]@{}
         $targets = @{}
-        $sections["This folder"] = @()
-        $targets["This folder"] = $root
-        $directories = @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force -ErrorAction Stop |
-            Where-Object { (Test-PathWithinRoot -Path $_.FullName) -and -not (Test-IsGitMetadataPath -Path $_.FullName) })
-        foreach ($directory in $directories) {
-            $sectionName = Get-RelativeFolderName -Path $directory.FullName
-            if (-not $sections.Contains($sectionName)) {
-                $sections[$sectionName] = @()
-                $targets[$sectionName] = $directory.FullName
-            }
-        }
-        $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop |
-            Where-Object { (Test-PathWithinRoot -Path $_.FullName) -and -not (Test-IsGitMetadataPath -Path $_.FullName) })
+        $sections[$root] = [System.Collections.Generic.List[object]]::new()
+        $targets[$root] = $root
+        $pendingDirectories = [System.Collections.Generic.Stack[string]]::new()
+        $visitedDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $pendingDirectories.Push($root)
+        [void]$visitedDirectories.Add($rootFinalPath)
+        $directoryCount = 0
+        $fileCount = 0
+        $spinner = @('|', '/', '-', '\')
+        $scanStarted = Get-Date
+        Write-Host "Scanning folder contents..." -ForegroundColor Cyan
 
-        foreach ($file in $files) {
-            $sectionName = Get-RelativeFolderName -Path $file.FullName
-            if (-not $sections.Contains($sectionName)) {
-                $sections[$sectionName] = @()
-                $targets[$sectionName] = $file.DirectoryName
-            }
-            $extension = $file.Extension.TrimStart('.').ToUpperInvariant()
-            if ([string]::IsNullOrWhiteSpace($extension)) { $extension = "FILE" }
-            $previewKind = switch -Regex ($file.Extension.ToLowerInvariant()) {
-                '^\.(png|jpe?g|gif|bmp|webp|avif|svg|ico)$' { 'image'; break }
-                '^\.(mp4|webm|ogv|mov|m4v)$' { 'video'; break }
-                '^\.(mp3|wav|ogg|m4a|flac|aac)$' { 'audio'; break }
-                '^\.(pdf)$' { 'pdf'; break }
-                '^\.(txt|md|csv|log|json|xml|html?|css|js|ps1|py|bat|cmd|ini|yml|yaml|toml|rtf)$' { 'text'; break }
-                default { 'unsupported' }
-            }
-            $sections[$sectionName] += [PSCustomObject]@{
-                name = $file.Name
-                path = $file.FullName
-                ext = $extension
-                size = [int64]$file.Length
-                added = $file.LastWriteTimeUtc.ToString('o')
-                image = $file.Extension -match '^\.(png|jpe?g|gif|bmp|webp|avif)$'
-                previewKind = $previewKind
+        while ($pendingDirectories.Count -gt 0) {
+            $currentDirectory = $pendingDirectories.Pop()
+            $directoryInfo = [IO.DirectoryInfo]::new($currentDirectory)
+            foreach ($entry in $directoryInfo.EnumerateFileSystemInfos()) {
+                if (Test-IsGitMetadataPath -Path $entry.FullName) { continue }
+                if (-not (Test-ScannedEntryWithinRoot -Entry $entry)) { continue }
+                $isDirectory = ($entry.Attributes -band [IO.FileAttributes]::Directory) -ne 0
+                if ($isDirectory) {
+                    $sectionName = $entry.FullName
+                    if (-not $sections.Contains($sectionName)) {
+                        $sections[$sectionName] = [System.Collections.Generic.List[object]]::new()
+                        $targets[$sectionName] = $entry.FullName
+                    }
+                    $resolvedDirectory = if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        [FolderLensPathResolver]::Resolve($entry.FullName)
+                    } else {
+                        [IO.Path]::GetFullPath($entry.FullName)
+                    }
+                    if ($visitedDirectories.Add($resolvedDirectory)) {
+                        $pendingDirectories.Push($entry.FullName)
+                    }
+                    $directoryCount++
+                } else {
+                    $file = [IO.FileInfo]$entry
+                    $sectionName = $file.DirectoryName
+                    if (-not $sections.Contains($sectionName)) {
+                        $sections[$sectionName] = [System.Collections.Generic.List[object]]::new()
+                        $targets[$sectionName] = $file.DirectoryName
+                    }
+                    $extension = $file.Extension.TrimStart('.').ToUpperInvariant()
+                    if ([string]::IsNullOrWhiteSpace($extension)) { $extension = "FILE" }
+                    $previewKind = switch -Regex ($file.Extension.ToLowerInvariant()) {
+                        '^\.(png|jpe?g|gif|bmp|webp|avif|svg|ico)$' { 'image'; break }
+                        '^\.(mp4|webm|ogv|mov|m4v)$' { 'video'; break }
+                        '^\.(mp3|wav|ogg|m4a|flac|aac)$' { 'audio'; break }
+                        '^\.(pdf)$' { 'pdf'; break }
+                        '^\.(txt|md|csv|log|json|xml|html?|css|js|ps1|py|bat|cmd|ini|yml|yaml|toml|rtf)$' { 'text'; break }
+                        default { 'unsupported' }
+                    }
+                    $sections[$sectionName].Add([PSCustomObject]@{
+                        name = $file.Name
+                        path = $file.FullName
+                        ext = $extension
+                        size = [int64]$file.Length
+                        added = $file.LastWriteTimeUtc.ToString('o')
+                        image = $file.Extension -match '^\.(png|jpe?g|gif|bmp|webp|avif)$'
+                        previewKind = $previewKind
+                    })
+                    $fileCount++
+                }
+                $scannedCount = $fileCount + $directoryCount
+                if ($scannedCount -eq 1 -or ($scannedCount % 250) -eq 0) {
+                    $frame = [int](($scannedCount / 250) % $spinner.Length)
+                    $elapsed = (Get-Date) - $scanStarted
+                    Write-Host ("`r{0} Scanned {1:N0} files and {2:N0} folders ({3:mm\:ss})" -f $spinner[$frame], $fileCount, $directoryCount, $elapsed) -NoNewline -ForegroundColor Cyan
+                }
             }
         }
 
@@ -356,9 +399,10 @@ public static class FolderLensPathResolver
         $sectionNames = [string[]]@($sections.Keys)
         [Array]::Sort($sectionNames, (New-Object ExplorerNameComparer))
         foreach ($sectionName in $sectionNames) {
-            $sortedSections[$sectionName] = @($sections[$sectionName] | Sort-Object name)
+            $sortedSections[$sectionName] = $sections[$sectionName].ToArray()
         }
-        return [PSCustomObject]@{ Sections = $sortedSections; Targets = $targets; Count = $files.Count }
+        Write-Host ("`rScan complete: {0:N0} files in {1:N0} folders ({2:mm\:ss})." -f $fileCount, $directoryCount, ((Get-Date) - $scanStarted)) -ForegroundColor Green
+        return [PSCustomObject]@{ Sections = $sortedSections; Targets = $targets; Count = $fileCount }
     }
 
     function Get-QueryValue {
@@ -619,7 +663,13 @@ public static class FolderLensPathResolver
         $Response.Close()
     }
 
-    $catalog = Get-LibraryCatalog
+    $catalog = [PSCustomObject]@{
+        Sections = [ordered]@{}
+        Targets = @{}
+        Count = 0
+    }
+    $catalog.Sections[$root] = @()
+    $catalog.Targets[$root] = $root
     $catalogJson = @{ sections = $catalog.Sections; targets = $catalog.Targets; root = $root } | ConvertTo-Json -Depth 10 -Compress
     $catalogJson = $catalogJson -replace '</script>', '<\/script>'
     $safeTitle = [Net.WebUtility]::HtmlEncode((Split-Path -Leaf $root))
@@ -641,6 +691,16 @@ public static class FolderLensPathResolver
   body::before { content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none; background: radial-gradient(circle at 12% 8%, rgba(220,225,232,.14), transparent 31%), radial-gradient(circle at 82% 14%, rgba(129,147,168,.11), transparent 29%), linear-gradient(145deg, #111315, #1b1e22 58%, #121416); }
   :root[data-theme="light"] body { background: #eaf0f5; color: #24364b; }
   :root[data-theme="light"] body::before { background: radial-gradient(circle at 12% 8%, rgba(255,255,255,.95), transparent 31%), radial-gradient(circle at 82% 14%, rgba(157,201,233,.35), transparent 29%), linear-gradient(145deg, #eaf0f5, #dce9f3 58%, #edf3f8); }
+  #loading-screen { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: rgba(12,15,18,.58); backdrop-filter: blur(7px); }
+  #loading-screen[hidden] { display: none; }
+  :root[data-theme="light"] #loading-screen { background: rgba(226,237,246,.62); }
+  .loading-card { display: flex; width: min(360px, 100%); align-items: center; gap: 16px; padding: 20px 22px; border: 1px solid rgba(255,255,255,.16); border-radius: 16px; background: rgba(35,39,45,.96); box-shadow: 0 20px 60px rgba(0,0,0,.28); }
+  :root[data-theme="light"] .loading-card { border-color: rgba(104,140,174,.25); background: rgba(255,255,255,.97); }
+  .loading-spinner { width: 30px; height: 30px; flex: 0 0 30px; border: 3px solid rgba(130,174,211,.2); border-top-color: #82b9e7; border-radius: 50%; animation: loading-spin .8s linear infinite; }
+  @keyframes loading-spin { to { transform: rotate(360deg); } }
+  .loading-title { margin-bottom: 4px; font-size: 13px; font-weight: 700; }
+  .loading-detail { color: #aab5c0; font-size: 11px; line-height: 1.5; }
+  :root[data-theme="light"] .loading-detail { color: #647d93; }
   .page-header { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin: 0 auto 28px; padding: 14px 18px; max-width: 1440px; border: 1px solid rgba(255,255,255,.15); border-radius: 18px; background: rgba(37,40,46,.65); backdrop-filter: blur(20px); }
   :root[data-theme="light"] .page-header { background: rgba(255,255,255,.62); border-color: rgba(104,140,174,.25); }
   .brand { display: flex; align-items: center; gap: 12px; min-width: 180px; }
@@ -732,6 +792,19 @@ public static class FolderLensPathResolver
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px; }
   .card { min-width: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(238,241,246,.19); border-radius: 15px; background: linear-gradient(155deg, rgba(255,255,255,.12), rgba(255,255,255,.045) 48%, rgba(190,197,208,.07)); box-shadow: 0 14px 34px rgba(7,5,16,.22); backdrop-filter: blur(14px); transition: transform .2s, border-color .2s; }
   .card:hover { transform: translateY(-3px); border-color: rgba(232,236,243,.5); }
+  .card.tree-file-highlight { animation: tree-file-highlight 1.25s ease-out; }
+  @keyframes tree-file-highlight {
+    0% { border-color: #8ccaff; box-shadow: 0 0 0 0 rgba(112,182,239,.55), 0 0 28px rgba(112,182,239,.42); }
+    45% { border-color: #8ccaff; box-shadow: 0 0 0 4px rgba(112,182,239,.22), 0 0 24px rgba(112,182,239,.28); }
+    100% { border-color: rgba(238,241,246,.19); box-shadow: 0 14px 34px rgba(7,5,16,.22); }
+  }
+  :root[data-theme="light"] .card.tree-file-highlight { animation-name: tree-file-highlight-light; }
+  @keyframes tree-file-highlight-light {
+    0% { border-color: #3488c7; box-shadow: 0 0 0 0 rgba(52,136,199,.42), 0 0 26px rgba(52,136,199,.32); }
+    45% { border-color: #3488c7; box-shadow: 0 0 0 4px rgba(52,136,199,.18), 0 0 22px rgba(52,136,199,.2); }
+    100% { border-color: rgba(255,255,255,.88); box-shadow: 0 14px 34px rgba(74,105,139,.12); }
+  }
+  @media (prefers-reduced-motion: reduce) { .card.tree-file-highlight { animation-duration: .01ms; } }
   :root[data-theme="light"] .card { background: linear-gradient(155deg, rgba(255,255,255,.85), rgba(255,255,255,.48) 48%, rgba(207,230,249,.42)); border-color: rgba(255,255,255,.88); box-shadow: 0 14px 34px rgba(74,105,139,.12); }
   .thumb { width: 100%; height: 142px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(160deg,#383c43,#22252a); }
   :root[data-theme="light"] .thumb { background: linear-gradient(160deg,#e5f1fb,#cbdff0); }
@@ -853,6 +926,9 @@ public static class FolderLensPathResolver
 </style>
 </head>
 <body>
+<div id="loading-screen" role="status" aria-live="polite">
+  <div class="loading-card"><span class="loading-spinner" aria-hidden="true"></span><div><div id="loading-title" class="loading-title">Opening folder</div><div id="loading-detail" class="loading-detail">Scanning files and preparing your library…</div></div></div>
+</div>
 <header class="page-header">
   <div class="brand"><div class="brand-mark"><img src="/favicon.svg" alt=""></div><div class="brand-copy"><h1>FolderLens</h1><span id="root-label"></span></div></div>
   <div class="header-actions">
@@ -895,6 +971,9 @@ let data = initialCatalog.sections;
 let sectionTargets = initialCatalog.targets;
 const app = document.getElementById('app');
 const toast = document.getElementById('toast');
+const loadingScreen = document.getElementById('loading-screen');
+const loadingTitle = document.getElementById('loading-title');
+const loadingDetail = document.getElementById('loading-detail');
 const rootElement = document.documentElement;
 const themeSwitch = document.getElementById('theme-switch');
 const workspace = document.getElementById('workspace');
@@ -916,6 +995,8 @@ let activePreviewFile = null;
 let selectedAppId = 'default';
 let refreshing = false;
 let treeResizeActive = false;
+let selectedTreeFilePath = null;
+let highlightTimer = null;
 const expandedTreePaths = new Set([initialCatalog.root.toLowerCase()]);
 const folderSectionIds = new Map();
 const fileDomIds = new Map();
@@ -964,29 +1045,99 @@ function sortFiles(files) {
   });
 }
 
-function renderFolderTree() {
+function normalizeFolderPath(path) {
+  const normalized = String(path).replace(/\//g, '\\');
+  return (normalized.length > 3 ? normalized.replace(/\\+$/, '') : normalized).toLocaleLowerCase();
+}
+function parentFolderPath(path) {
+  const normalized = String(path).replace(/\//g, '\\');
+  const trimmed = normalized.length > 3 ? normalized.replace(/\\+$/, '') : normalized;
+  const separator = trimmed.lastIndexOf('\\');
+  if (separator < 0) return '';
+  if (separator === 2 && /^[a-z]:/i.test(trimmed)) return trimmed.slice(0, 3);
+  return trimmed.slice(0, separator);
+}
+function buildFolderTreeModel() {
   const rootPath = initialCatalog.root.replace(/[\\/]+$/, '');
-  document.getElementById('tree-root-name').textContent = initialCatalog.root;
-  const rootNode = { name: rootPath.split(/[\\/]/).pop() || rootPath, path: initialCatalog.root, children: new Map(), sectionName: null, files: [] };
-  for (const [sectionName, targetPath] of Object.entries(sectionTargets)) {
+  const rootNode = {
+    name: rootPath.split(/[\\/]/).pop() || initialCatalog.root,
+    path: initialCatalog.root,
+    children: new Map(),
+    sectionName: null,
+    files: [],
+    depth: 0,
+    size: 0,
+    modified: 0
+  };
+  const nodes = new Map([[normalizeFolderPath(rootNode.path), rootNode]]);
+  const targetsByDepth = Object.entries(sectionTargets).sort((left, right) =>
+    String(left[1]).split(/[\\/]+/).length - String(right[1]).split(/[\\/]+/).length);
+  for (const [, targetPath] of targetsByDepth) {
     const target = String(targetPath);
-    const relativePath = target.toLowerCase().startsWith(rootPath.toLowerCase())
-      ? target.slice(rootPath.length).replace(/^[\\/]+/, '')
-      : '';
-    const parts = relativePath ? relativePath.split(/[\\/]+/).filter(Boolean) : [];
-    let node = rootNode;
-    let currentPath = initialCatalog.root;
-    for (const part of parts) {
-      currentPath += (currentPath.endsWith('\\') || currentPath.endsWith('/') ? '' : '\\') + part;
-      if (!node.children.has(part.toLowerCase())) {
-        node.children.set(part.toLowerCase(), { name: part, path: currentPath, children: new Map(), sectionName: null, files: [] });
-      }
-      node = node.children.get(part.toLowerCase());
+    const key = normalizeFolderPath(target);
+    if (!nodes.has(key)) {
+      const parentPath = parentFolderPath(target);
+      const parent = nodes.get(normalizeFolderPath(parentPath)) || rootNode;
+      const name = target.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || target;
+      const node = { name, path: target, children: new Map(), sectionName: null, files: [], depth: parent.depth + 1, size: 0, modified: 0 };
+      nodes.set(key, node);
+      parent.children.set(key, node);
     }
+  }
+  for (const [sectionName, targetPath] of Object.entries(sectionTargets)) {
+    const node = nodes.get(normalizeFolderPath(targetPath));
+    if (!node) continue;
     node.sectionName = sectionName;
     node.files = data[sectionName] || [];
   }
+  function calculateFolderStats(node) {
+    for (const file of node.files) {
+      node.size += Number(file.size) || 0;
+      node.modified = Math.max(node.modified, Date.parse(file.added) || 0);
+    }
+    for (const child of node.children.values()) {
+      calculateFolderStats(child);
+      node.size += child.size;
+      node.modified = Math.max(node.modified, child.modified);
+    }
+  }
+  calculateFolderStats(rootNode);
+  return rootNode;
+}
+function compareFolderNodes(left, right) {
+  const direction = sortOrder.value === 'desc' ? -1 : 1;
+  let comparison = 0;
+  if (sortBy.value === 'size') comparison = left.size - right.size;
+  else if (sortBy.value === 'added') comparison = left.modified - right.modified;
+  else comparison = naturalCompare.compare(left.name, right.name);
+  return comparison * direction || naturalCompare.compare(left.name, right.name);
+}
+function getSortedFolderSections(rootNode) {
+  const ordered = [];
+  function visit(node) {
+    if (node.sectionName) ordered.push(node);
+    const children = [...node.children.values()].sort(compareFolderNodes);
+    for (const child of children) visit(child);
+  }
+  visit(rootNode);
+  return ordered;
+}
 
+function highlightTreeFile(filePath) {
+  selectedTreeFilePath = filePath;
+  const cardId = fileDomIds.get(filePath.toLowerCase());
+  const card = cardId && document.getElementById(cardId);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('tree-file-highlight');
+  void card.offsetWidth;
+  card.classList.add('tree-file-highlight');
+  clearTimeout(highlightTimer);
+  highlightTimer = setTimeout(() => card.classList.remove('tree-file-highlight'), 1350);
+}
+
+function renderFolderTree(rootNode) {
+  document.getElementById('tree-root-name').textContent = initialCatalog.root;
   function makeTreeBranch(node, isRoot) {
     const item = document.createElement('li');
     const details = document.createElement('details');
@@ -1010,7 +1161,7 @@ function renderFolderTree() {
     label.textContent = node.name;
     summary.append(caret, folderIcon, label);
     const folderId = folderSectionIds.get(node.path.toLowerCase());
-    const sectionName = Object.keys(sectionTargets).find(name => String(sectionTargets[name]).toLowerCase() === node.path.toLowerCase());
+    const sectionName = node.sectionName;
     if (sectionName && data[sectionName]) {
       const count = document.createElement('span');
       count.className = 'tree-count';
@@ -1028,7 +1179,7 @@ function renderFolderTree() {
     });
     details.appendChild(summary);
 
-    const children = [...node.children.values()].sort((left, right) => naturalCompare.compare(left.name, right.name));
+    const children = [...node.children.values()].sort(compareFolderNodes);
     if (children.length || node.files.length) {
       const nested = document.createElement('ul');
       nested.className = 'tree-children';
@@ -1039,6 +1190,7 @@ function renderFolderTree() {
         fileRow.type = 'button';
         fileRow.className = 'tree-row file-tree-row';
         fileRow.title = file.path;
+        if (selectedTreeFilePath && selectedTreeFilePath.toLowerCase() === file.path.toLowerCase()) fileRow.classList.add('active');
         const fileIcon = document.createElement('span');
         fileIcon.className = 'tree-file-icon';
         fileIcon.innerHTML = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.8h6.4l3.8 3.8v10.6H5V2.8Z" fill="currentColor" fill-opacity=".12" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M11.2 3v4h4M7.5 10h5.2M7.5 12.7h5.2" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -1049,8 +1201,7 @@ function renderFolderTree() {
         fileRow.addEventListener('click', () => {
           document.querySelectorAll('.tree-row.active').forEach(row => row.classList.remove('active'));
           fileRow.classList.add('active');
-          const fileElement = document.getElementById(fileDomIds.get(file.path.toLowerCase()));
-          if (fileElement) fileElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          highlightTreeFile(file.path);
         });
         fileItem.appendChild(fileRow);
         nested.appendChild(fileItem);
@@ -1076,7 +1227,7 @@ function applyTreeSearch() {
   const items = [...treeContent.querySelectorAll('li')];
   for (const item of items.reverse()) {
     const row = item.querySelector(':scope > details > .tree-row, :scope > .tree-row');
-    const ownMatch = !query || row.textContent.toLocaleLowerCase().includes(query);
+    const ownMatch = !query || row.textContent.toLocaleLowerCase().includes(query) || row.title.toLocaleLowerCase().includes(query);
     const descendantMatch = Boolean(item.querySelector('li:not([hidden])'));
     item.hidden = !ownMatch && !descendantMatch;
     if (query && descendantMatch) {
@@ -1094,23 +1245,29 @@ function renderCatalog(nextData, nextTargets) {
   app.replaceChildren();
   folderSectionIds.clear();
   fileDomIds.clear();
-  const sectionNames = Object.keys(data).sort(naturalCompare.compare);
+  const folderRoot = buildFolderTreeModel();
+  const orderedFolders = getSortedFolderSections(folderRoot);
+  const sectionNames = orderedFolders.map(folder => folder.sectionName);
   if (!sectionNames.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = 'This folder is empty.';
     app.appendChild(empty);
-    renderFolderTree();
+    renderFolderTree(folderRoot);
     return;
   }
   for (const [sectionIndex, sectionName] of sectionNames.entries()) {
+    const folder = orderedFolders[sectionIndex];
     const section = document.createElement('section');
     section.className = 'series';
     section.id = 'folder-section-' + sectionIndex;
     section.dataset.folderPath = sectionTargets[sectionName] || '';
+    section.style.setProperty('--folder-depth', String(Math.min(folder.depth, 6)));
+    section.style.marginLeft = Math.min(folder.depth * 18, 108) + 'px';
     if (section.dataset.folderPath) folderSectionIds.set(section.dataset.folderPath.toLowerCase(), section.id);
     const heading = document.createElement('h2');
     heading.textContent = sectionName;
+    heading.title = sectionName;
     section.appendChild(heading);
     const grid = document.createElement('div');
     grid.className = 'grid';
@@ -1119,6 +1276,9 @@ function renderCatalog(nextData, nextTargets) {
       card.className = 'card';
       card.id = 'file-entry-' + sectionIndex + '-' + fileIndex;
       fileDomIds.set(file.path.toLowerCase(), card.id);
+      if (selectedTreeFilePath && selectedTreeFilePath.toLowerCase() === file.path.toLowerCase()) {
+        card.classList.add('tree-file-highlight');
+      }
       const thumb = document.createElement('div');
       thumb.className = 'thumb';
       if (file.image) {
@@ -1202,7 +1362,15 @@ function renderCatalog(nextData, nextTargets) {
     section.appendChild(grid);
     app.appendChild(section);
   }
-  renderFolderTree();
+  renderFolderTree(folderRoot);
+  if (selectedTreeFilePath) {
+    const selectedCardId = fileDomIds.get(selectedTreeFilePath.toLowerCase());
+    const selectedCard = selectedCardId && document.getElementById(selectedCardId);
+    if (selectedCard) {
+      clearTimeout(highlightTimer);
+      highlightTimer = setTimeout(() => selectedCard.classList.remove('tree-file-highlight'), 1350);
+    }
+  }
 }
 
 async function uploadFiles(fileList, targetFolder) {
@@ -1534,30 +1702,49 @@ window.addEventListener('resize', () => {
   }
 });
 
-async function refreshLibrary() {
+async function refreshLibrary(initialLoad = false) {
   if (refreshing) return;
   refreshing = true;
   refreshButton.disabled = true;
-  refreshButton.textContent = 'Scanning...';
+  refreshButton.textContent = initialLoad ? 'Opening...' : 'Scanning...';
+  loadingTitle.textContent = initialLoad ? 'Opening folder' : 'Refreshing folder';
+  loadingDetail.textContent = initialLoad
+    ? 'Scanning files and preparing your library…'
+    : 'Rescanning files and updating the folder view…';
+  loadingScreen.hidden = false;
   try {
     const response = await fetch('/library', { cache: 'no-store' });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not refresh folder.');
     renderCatalog(result.sections, result.targets);
-    showToast('Folder refreshed.');
+    loadingScreen.hidden = true;
+    if (!initialLoad) showToast('Folder refreshed.');
   } catch (error) {
+    loadingScreen.hidden = true;
     showToast(error.message);
     console.error('Could not refresh folder:', error);
+    if (initialLoad) {
+      app.replaceChildren();
+      const failure = document.createElement('div');
+      failure.className = 'empty';
+      failure.textContent = 'Folder could not be opened: ' + error.message + ' ';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = 'Try again';
+      retry.addEventListener('click', () => refreshLibrary(true));
+      failure.appendChild(retry);
+      app.appendChild(failure);
+    }
   } finally {
     refreshing = false;
     refreshButton.disabled = false;
     refreshButton.textContent = 'Refresh folder';
   }
 }
-refreshButton.addEventListener('click', refreshLibrary);
+refreshButton.addEventListener('click', () => refreshLibrary());
 sortBy.addEventListener('change', () => renderCatalog(data));
 sortOrder.addEventListener('change', () => renderCatalog(data));
-renderCatalog(data, sectionTargets);
+refreshLibrary(true);
 function heartbeat() { fetch('/heartbeat', { cache: 'no-store' }).catch(() => {}); }
 heartbeat();
 setInterval(heartbeat, 5000);
@@ -1576,15 +1763,15 @@ window.addEventListener('pagehide', () => navigator.sendBeacon('/page-close', ''
         Start-Process $url
     }
 
+    [Console]::Title = "FolderLens - DO NOT CLOSE THIS WINDOW"
     Write-Host "Browsing $root"
-    Write-Host "Close the browser tab or window to stop the local server."
-    $lastHeartbeat = Get-Date
+    Write-Host "DO NOT CLOSE THIS TERMINAL while FolderLens is open." -ForegroundColor Yellow
+    Write-Host "FolderLens will stop this server after you close its browser window." -ForegroundColor DarkGray
     $pageCloseRequested = $null
     $pending = $listener.BeginGetContext($null, $null)
     while ($listener.IsListening) {
         if (-not $pending.AsyncWaitHandle.WaitOne(500)) {
-            if ($pageCloseRequested -and ((Get-Date) - $pageCloseRequested).TotalSeconds -ge 5) { break }
-            if (((Get-Date) - $lastHeartbeat).TotalSeconds -ge 60) { break }
+            if ($pageCloseRequested -and ((Get-Date) - $pageCloseRequested).TotalSeconds -ge 15) { break }
             continue
         }
 
@@ -1593,7 +1780,6 @@ window.addEventListener('pagehide', () => navigator.sendBeacon('/page-close', ''
         $response = $context.Response
         $path = $request.Url.AbsolutePath
         if ($path -eq '/heartbeat') {
-            $lastHeartbeat = Get-Date
             $pageCloseRequested = $null
             $response.StatusCode = 204
             $response.Close()
@@ -1777,6 +1963,7 @@ window.addEventListener('pagehide', () => navigator.sendBeacon('/page-close', ''
     }
     $listener.Stop()
     $listener.Close()
+    Write-Host "FolderLens browser closed. Local server stopped." -ForegroundColor Green
 }
 catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
